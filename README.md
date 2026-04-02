@@ -1,5 +1,7 @@
 # Mentalist (DeepAgent Middleware)
 
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Rust](https://img.shields.io/badge/language-Rust-orange.svg) ![Status: Active](https://img.shields.io/badge/Status-Active-brightgreen.svg) ![Methodology: DeepAgent](https://img.shields.io/badge/Methodology-DeepAgent-blue.svg)
+
 ![Mentalist & MindPalace Demo](./examples/mentalist_mindpalace.gif)
 
 The **Mentalist** is a high-performance, production-ready execution environment for autonomous agents in Rust. It implements the **Agent = Model + Harness** paradigm from the **DeepAgent methodology**, providing the necessary infrastructure to make LLM-based agents reliable, stateful, and secure.
