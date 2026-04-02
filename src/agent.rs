@@ -35,24 +35,40 @@ impl DeepAgent {
 
         // 2. Process Recursive Tool Calls
         for mut tool in response.tool_calls {
-            // Simplified tool argument parsing
+            // Robust tool argument parsing (handling non-string primitives)
             let args = tool.arguments
                 .as_object()
-                .map(|obj| obj.values().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                .map(|obj| {
+                    obj.values()
+                        .map(|v| {
+                            if v.is_string() {
+                                v.as_str().unwrap().to_string()
+                            } else {
+                                v.to_string() // Stringify numbers/bools/objects
+                            }
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
+
+            // Pre-tool state save (Session Persistence Pillar)
+            self.save_state().await?;
 
             // Run Tool Hooks (Safety check happens here)
             let mut result = "In-progress".to_string();
             self.harness.run_tool_hooks(&mut tool, &mut result).await?;
-
-            // Execute in the sandbox
+            
+            // Execute in the sandbox (Docker or Local)
             result = self.executor.execute(&tool.name, args).await?;
             
             // Post-tool hooks (Offloading/Extraction happens here)
             self.harness.run_tool_hooks(&mut tool, &mut result).await?;
+
+            // Post-tool state save
+            self.save_state().await?;
         }
 
-        // 3. Save State (Session Serialization Pillar)
+        // 3. Final Save State (Session Serialization Pillar)
         self.save_state().await?;
 
         Ok(response.content)

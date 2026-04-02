@@ -8,6 +8,8 @@ pub mod middleware;
 pub mod agent;
 pub use agent::{DeepAgent, DeepAgentState};
 
+use futures_util::stream::BoxStream;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub prompt: String,
@@ -21,6 +23,19 @@ pub struct Response {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseChunk {
+    pub content_delta: Option<String>,
+    pub tool_call_delta: Option<ToolCallDelta>,
+    pub is_final: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    pub name: Option<String>,
+    pub arguments_delta: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
@@ -28,7 +43,11 @@ pub struct ToolCall {
 
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    /// Non-streaming completion.
     async fn complete(&self, req: Request) -> anyhow::Result<Response>;
+    
+    /// Streaming completion for real-time observability.
+    async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>>;
 }
 
 pub struct Harness {
@@ -64,6 +83,19 @@ impl Harness {
         }
 
         Ok(res)
+    }
+
+    /// Orchestrated Streaming Loop.
+    /// Note: Interceptors like after_ai_call should be triggered by the caller
+    /// once the stream is fully collected into a Response.
+    pub async fn run_stream(&self, mut req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
+        // 1. Hook: before_ai_call (Context Optimization/Planning)
+        for mw in &self.middlewares {
+            mw.before_ai_call(&mut req).await?;
+        }
+
+        // 2. Execute AI reasoning (Streaming)
+        self.provider.stream_complete(req).await
     }
 
     /// Helper for executed tool hooks (to be used by the Agent loop).

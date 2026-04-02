@@ -1,6 +1,6 @@
 use clap::Parser;
 use colored::*;
-use mentalist::{Harness, Request, Response, DeepAgent, DeepAgentState, ModelProvider};
+use mentalist::{Harness, Request, Response, ResponseChunk, DeepAgent, DeepAgentState, ModelProvider};
 use mentalist::middleware::{MindPalaceMiddleware, todo::TodoMiddleware};
 use brain::Brain;
 use mem_core::Context;
@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::time::{sleep, Duration};
+use futures_util::stream::BoxStream;
 
 #[derive(Parser)]
 struct Args {
@@ -23,21 +24,37 @@ pub struct MockProvider;
 #[async_trait]
 impl ModelProvider for MockProvider {
     async fn complete(&self, req: Request) -> Result<Response> {
-        // Mocking reasoning based on prompt keywords to simulate intelligence
-        let content = if req.prompt.contains("Analyze") {
-            "Assessment complete. Found a modular 7-layer memory architecture with SHA-256 offloading and Zstd archival."
-        } else if req.prompt.contains("plan") {
-            "Strategy formulated: 1. Scan CAS registry, 2. Run Layer 3 Summarizer, 3. Execute Fact Extraction."
-        } else if req.prompt.contains("Standardize") {
-            "Instruction received. I will now enforce consistency across all internal fact extraction tools."
-        } else {
-            "I am the Mentalist DeepAgent. How can I assist with your memory optimization today?"
-        }.to_string();
-
+        let content = self.mock_logic(&req.prompt);
         Ok(Response {
             content,
             tool_calls: vec![],
         })
+    }
+
+    async fn stream_complete(&self, req: Request) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+        let content = self.mock_logic(&req.prompt);
+        let stream = async_stream::try_stream! {
+            yield ResponseChunk {
+                content_delta: Some(content),
+                tool_call_delta: None,
+                is_final: true,
+            };
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+impl MockProvider {
+    fn mock_logic(&self, prompt: &str) -> String {
+        if prompt.contains("Analyze") {
+            "Assessment complete. Found a modular 7-layer memory architecture with SHA-256 offloading and Zstd archival."
+        } else if prompt.contains("plan") {
+            "Strategy formulated: 1. Scan CAS registry, 2. Run Layer 3 Summarizer, 3. Execute Fact Extraction."
+        } else if prompt.contains("Standardize") {
+            "Instruction received. I will now enforce consistency across all internal fact extraction tools."
+        } else {
+            "I am the Mentalist DeepAgent. How can I assist with your memory optimization today?"
+        }.to_string()
     }
 }
 
