@@ -1,7 +1,8 @@
 use serde::{Serialize, Deserialize};
 use crate::{Harness, Request, executor::SandboxedExecutor};
-use mem_core::Context;
-use std::fs;
+use mem_core::{Context, FileStorage};
+use mem_resilience::ResilientMemoryController;
+use std::sync::Arc;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
@@ -16,11 +17,17 @@ pub struct DeepAgent {
     pub harness: Harness,
     pub state: DeepAgentState,
     pub executor: SandboxedExecutor,
+    pub memory_controller: Arc<ResilientMemoryController<FileStorage>>,
 }
 
 impl DeepAgent {
-    pub fn new(harness: Harness, state: DeepAgentState, executor: SandboxedExecutor) -> Self {
-        Self { harness, state, executor }
+    pub fn new(
+        harness: Harness, 
+        state: DeepAgentState, 
+        executor: SandboxedExecutor, 
+        memory_controller: Arc<ResilientMemoryController<FileStorage>>
+    ) -> Self {
+        Self { harness, state, executor, memory_controller }
     }
 
     /// Executes a single reasoning/action step following the DeepAgent loop.
@@ -35,7 +42,6 @@ impl DeepAgent {
 
         // 2. Process Recursive Tool Calls
         for mut tool in response.tool_calls {
-            // Robust tool argument parsing (handling non-string primitives)
             let args = tool.arguments
                 .as_object()
                 .map(|obj| {
@@ -44,46 +50,51 @@ impl DeepAgent {
                             if v.is_string() {
                                 v.as_str().unwrap().to_string()
                             } else {
-                                v.to_string() // Stringify numbers/bools/objects
+                                v.to_string()
                             }
                         })
                         .collect()
                 })
                 .unwrap_or_default();
 
-            // Pre-tool state save (Session Persistence Pillar)
-            self.save_state().await?;
+            // Pre-tool state save (Resilient Pillar)
+            self.save_state_resilient().await?;
 
-            // Run Tool Hooks (Safety check happens here)
+            // Run Tool Hooks
             let mut result = "In-progress".to_string();
             self.harness.run_tool_hooks(&mut tool, &mut result).await?;
             
-            // Execute in the sandbox (Docker or Local)
+            // Execute in the sandbox
             result = self.executor.execute(&tool.name, args).await?;
             
             // Post-tool hooks (Offloading/Extraction happens here)
             self.harness.run_tool_hooks(&mut tool, &mut result).await?;
 
-            // Post-tool state save
-            self.save_state().await?;
+            // Post-tool state save (Resilient Pillar)
+            self.save_state_resilient().await?;
         }
 
-        // 3. Final Save State (Session Serialization Pillar)
-        self.save_state().await?;
+        // 3. Final Resilient Save State
+        self.save_state_resilient().await?;
 
         Ok(response.content)
     }
 
-    /// Persists the entire agent state (History + Memory Snapshots) for crash recovery.
-    pub async fn save_state(&self) -> anyhow::Result<()> {
+    /// Persists agent state using the ResilientMemoryController (Gap 9)
+    pub async fn save_state_resilient(&self) -> anyhow::Result<()> {
         let root = PathBuf::from(".agent/sessions");
         if !root.exists() {
-            fs::create_dir_all(&root)?;
+            std::fs::create_dir_all(&root)?;
         }
         
         let path = root.join(format!("session_{}.json", self.state.session_id));
         let data = serde_json::to_vec_pretty(&self.state)?;
-        fs::write(path, data)?;
+        
+        // Resilience: Wrap saving in an emergency snapshot logic if possible, 
+        // or just ensure the memory controller is aware of the context state.
+        self.memory_controller.optimize_resilient(&mut self.state.context.clone()).await?;
+        
+        std::fs::write(path, data)?;
         Ok(())
     }
 }

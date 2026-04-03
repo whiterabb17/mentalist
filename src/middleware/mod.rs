@@ -1,7 +1,13 @@
-use async_trait::async_trait;
-use std::sync::Arc;
 use crate::{Request, Response, ToolCall};
+use async_trait::async_trait;
 use brain::Brain;
+use mem_bridge::AgentBridge;
+use mem_core::{Context, FileStorage, MemoryItem, MemoryRole};
+use mem_extractor::{FactExtractor, ReflectionLayer};
+use mem_offloader::{OffloaderConfig, ToolOffloader};
+use mem_retriever::{MemoryRetriever, RuVectorStore};
+use ruvector_core::types::DistanceMetric;
+use std::sync::Arc;
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
@@ -21,26 +27,167 @@ pub trait Middleware: Send + Sync {
     }
 
     /// Fires after a tool result is returned.
-    async fn after_tool_call(&self, _result: &mut String) -> anyhow::Result<()> {
+    async fn after_tool_call(&self, _tool: &ToolCall, _result: &mut String) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
+pub struct SafetyMiddleware {
+    pub forbidden_tools: Vec<String>,
+}
+
+impl SafetyMiddleware {
+    pub fn new(forbidden: Vec<String>) -> Self {
+        Self { forbidden_tools: forbidden }
+    }
+}
+
+#[async_trait]
+impl Middleware for SafetyMiddleware {
+    async fn before_tool_call(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
+        if self.forbidden_tools.contains(&tool.name) {
+            anyhow::bail!("Security: Tool '{}' is forbidden by SafetyMiddleware.", tool.name);
+        }
+        Ok(())
+    }
+}
+
+
 pub struct MindPalaceMiddleware {
     pub brain: Arc<Brain>,
+    pub extractor: Arc<FactExtractor<FileStorage>>,
+    pub retriever: MemoryRetriever<FileStorage>,
+    pub bridge: Arc<AgentBridge<FileStorage>>,
+    pub session_id: String,
+    pub token_budget: usize,
 }
 
 impl MindPalaceMiddleware {
-    pub fn new(brain: Arc<Brain>) -> Self {
-        Self { brain }
+    pub fn new(
+        brain: Arc<Brain>,
+        extractor: Arc<FactExtractor<FileStorage>>,
+        retriever: MemoryRetriever<FileStorage>,
+        bridge: Arc<AgentBridge<FileStorage>>,
+        session_id: String,
+    ) -> Self {
+        Self {
+            brain,
+            extractor,
+            retriever,
+            bridge,
+            session_id,
+            token_budget: 4096,
+        }
+    }
+
+    /// Factory method to create a fully-hardened 7-layer production middleware
+    pub fn hardened(
+        storage: FileStorage,
+        llm: Arc<dyn mem_core::LlmClient>,
+        embeddings: Arc<dyn mem_core::EmbeddingProvider>,
+        token_counter: Arc<dyn mem_core::TokenCounter>,
+        session_id: String,
+    ) -> Self {
+        let mut brain = Brain::new(None, Some(token_counter));
+        let extractor = Arc::new(FactExtractor::new(
+            llm.clone(),
+            embeddings.clone(),
+            storage.clone(),
+            "knowledge.json".to_string(),
+            session_id.clone(),
+        ));
+
+        // 1. Efficiency: Tool Offloader
+        brain.add_layer(Arc::new(ToolOffloader::new(
+            storage.clone(),
+            OffloaderConfig::default(),
+        )));
+
+        // 2. Intelligence: Reflection & Fact Extraction
+        brain.add_layer(Arc::new(ReflectionLayer::new(extractor.clone())));
+        brain.add_layer(extractor.clone());
+
+        // 3. Coordination: Agent Bridge (Priority 7)
+        let bridge = Arc::new(AgentBridge::new(storage.clone()));
+        brain.add_layer(bridge.clone());
+
+        // 4. Persistence: RuVector Index (SOTA Performance)
+        let graph = Arc::new(mem_core::FactGraph::new(None).expect("Failed to init fact graph"));
+        let store = Arc::new(RuVectorStore::new(384, DistanceMetric::Cosine, graph.clone())); // Default 384 for Nomic/Ollama
+        let retriever = MemoryRetriever::new(storage, embeddings, llm, store, graph);
+
+        Self::new(Arc::new(brain), extractor, retriever, bridge, session_id)
     }
 }
 
 #[async_trait]
 impl Middleware for MindPalaceMiddleware {
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
-        // Pillar: Stateful Context Defense
+        // High-Precision RAG Fact Injection
+        let facts = self
+            .retriever
+            .retrieve_relevant_facts(&req.prompt, 5, None)
+            .await?;
+
+        if !facts.is_empty() {
+            let mut fact_content = String::from("### RELEVANT KNOWLEDGE ###\n");
+            for (fact, score) in facts {
+                fact_content.push_str(&format!(
+                    "- [{}] {} (similarity: {:.2})\n",
+                    fact.category, fact.content, score
+                ));
+            }
+
+            req.context.items.push(MemoryItem {
+                role: MemoryRole::System,
+                content: fact_content,
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                metadata: serde_json::json!({"rag": true}),
+            });
+        }
+
+        // Orchestrated 7-Layer Optimization (Hardened Logic)
         self.brain.optimize(&mut req.context).await?;
+
+        // Proactive token budget compaction check
+        if let Some(counter) = &self.brain.token_counter {
+            let current_tokens: usize = req
+                .context
+                .items
+                .iter()
+                .map(|i| counter.count_tokens(&i.content))
+                .sum();
+            if current_tokens > (self.token_budget as f32 * 0.8) as usize {
+                tracing::warn!(
+                    "Token budget critical ({}%). Performance may degrade.",
+                    (current_tokens as f32 / self.token_budget as f32) * 100.0
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn after_tool_call(&self, _tool: &ToolCall, result: &mut String) -> anyhow::Result<()> {
+        // Deductive Fact Extraction from tool results
+        let temp_context = Context {
+            items: vec![MemoryItem {
+                role: MemoryRole::Tool,
+                content: result.clone(),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                metadata: serde_json::json!({}),
+            }],
+        };
+
+        let new_facts = self.extractor.extract_facts(&temp_context).await?;
+        if !new_facts.is_empty() {
+            tracing::info!("Extracted {} facts from tool output.", new_facts.len());
+            self.extractor.commit_knowledge(new_facts).await?;
+            self.retriever
+                .hydrate_from_kb(&self.extractor.knowledge_path)
+                .await?;
+        }
+
         Ok(())
     }
 }

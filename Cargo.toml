@@ -1,6 +1,6 @@
 [package]
 name = "mentalist"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["MindPalace Authors"]
 license = "MIT"
@@ -8,6 +8,12 @@ license = "MIT"
 [dependencies]
 mem-core = { path = "../mindpalace/crates/mem-core" }
 brain = { path = "../mindpalace/crates/brain" }
+mem-resilience = { path = "../mindpalace/crates/mem-resilience" }
+mem-extractor = { path = "../mindpalace/crates/mem-extractor" }
+mem-retriever = { path = "../mindpalace/crates/mem-retriever" }
+mem-bridge = { path = "../mindpalace/crates/mem-bridge" }
+mem-offloader = { path = "../mindpalace/crates/mem-offloader" }
+
 tokio = { version = "1", features = ["full", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,3 +35,4 @@ async-stream = "0.3"
 wasmtime = { version = "29.0", features = ["async"] }
 wasmtime-wasi = { version = "29.0", features = ["preview1"] }
 cap-std = "3.4"
+ruvector-core = "0.1"
