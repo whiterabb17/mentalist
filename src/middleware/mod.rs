@@ -88,11 +88,13 @@ impl MindPalaceMiddleware {
         token_counter: Arc<dyn mem_core::TokenCounter>,
         session_id: String,
     ) -> Self {
-        let mut brain = Brain::new(None, Some(token_counter));
+        let config = mem_core::MindPalaceConfig::default();
+        let mut brain = Brain::new(config.clone(), None, Some(token_counter));
         let extractor = Arc::new(FactExtractor::new(
             llm.clone(),
             embeddings.clone(),
             storage.clone(),
+            config.clone(),
             "knowledge.json".to_string(),
             session_id.clone(),
         ));
