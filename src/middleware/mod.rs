@@ -6,7 +6,8 @@ use mem_bridge::AgentBridge;
 use mem_core::{Context, FileStorage, MemoryItem, MemoryRole};
 use mem_extractor::{FactExtractor, ReflectionLayer};
 use mem_offloader::{OffloaderConfig, ToolOffloader};
-use mem_retriever::{DistanceMetric, MemoryRetriever, RuVectorStore};
+use mem_retriever::{MemoryRetriever, RuVectorStore};
+use ruvector_core::types::DistanceMetric;
 use std::sync::Arc;
 
 #[async_trait]
