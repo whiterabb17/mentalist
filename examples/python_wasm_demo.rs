@@ -9,10 +9,12 @@ async fn main() -> Result<()> {
     // Download from: https://github.com/vmware-labs/webassembly-language-runtimes
     let executor = SandboxedExecutor::new(
         ExecutionMode::Wasm { 
-            module_path: PathBuf::from("./tools/python.wasm"), 
-            mount_root: true 
+            module_path: Some(PathBuf::from("./tools/python.wasm")), 
+            mount_root: true,
+            env_vars: std::collections::HashMap::new(),
         },
-        PathBuf::from("./") // Project root
+        PathBuf::from("./"), // Project root
+        None                 // vault_dir
     );
 
     println!("🚀 Running Python via WebAssembly Sandbox...");

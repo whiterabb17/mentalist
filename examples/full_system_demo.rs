@@ -28,8 +28,18 @@ impl ModelProvider for MockProvider {
 
     async fn stream_complete(&self, _req: Request) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
         let stream = async_stream::try_stream! {
-            yield ResponseChunk { content_delta: Some("Streaming... ".to_string()), tool_call_delta: None, is_final: false };
-            yield ResponseChunk { content_delta: Some("Done!".to_string()), tool_call_delta: None, is_final: true };
+            yield ResponseChunk { 
+                content_delta: Some("Streaming... ".to_string()), 
+                tool_call_delta: None, 
+                usage: None,
+                is_final: false 
+            };
+            yield ResponseChunk { 
+                content_delta: Some("Done!".to_string()), 
+                tool_call_delta: None, 
+                usage: None,
+                is_final: true 
+            };
         };
         Ok(Box::pin(stream))
     }
@@ -106,7 +116,8 @@ async fn main() -> Result<()> {
     
     let executor = mentalist::executor::SandboxedExecutor::new(
         mentalist::executor::ExecutionMode::Local,
-        std::env::current_dir()?
+        std::env::current_dir()?,
+        None
     );
 
     let mut agent = DeepAgent::new(harness, state, executor, memory_controller);

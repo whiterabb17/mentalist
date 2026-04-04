@@ -70,4 +70,12 @@ impl Harness {
         }
         Ok(())
     }
+
+    /// Triggers manual context optimization/summarization across all middlewares.
+    pub async fn optimize_context(&self, ctx: &mut Context) -> anyhow::Result<()> {
+        for mw in &self.middlewares {
+            mw.optimize_context(ctx).await?;
+        }
+        Ok(())
+    }
 }

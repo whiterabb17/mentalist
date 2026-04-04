@@ -30,6 +30,11 @@ pub trait Middleware: Send + Sync {
     async fn after_tool_call(&self, _tool: &ToolCall, _result: &mut String) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Fires to manually request optimization/summarization of context.
+    async fn optimize_context(&self, _ctx: &mut Context) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct SafetyMiddleware {
@@ -227,6 +232,11 @@ impl Middleware for MindPalaceMiddleware {
                 .await?;
         }
 
+        Ok(())
+    }
+
+    async fn optimize_context(&self, ctx: &mut Context) -> anyhow::Result<()> {
+        self.brain.optimize(ctx).await?;
         Ok(())
     }
 }
