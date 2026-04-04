@@ -1,4 +1,4 @@
-use crate::{Harness, Request, executor::SandboxedExecutor};
+use crate::{Harness, Request, executor::ToolExecutor};
 use mem_core::{Context, FileStorage, ToolCall};
 use mem_resilience::ResilientMemoryController;
 use std::sync::Arc;
@@ -33,7 +33,7 @@ impl Default for StepConfig {
 pub struct DeepAgent {
     pub harness: Harness,
     pub state: DeepAgentState,
-    pub executor: SandboxedExecutor,
+    pub executor: Arc<dyn ToolExecutor>,
     pub memory_controller: Arc<ResilientMemoryController<FileStorage>>,
 }
 
@@ -41,7 +41,7 @@ impl DeepAgent {
     pub fn new(
         harness: Harness, 
         state: DeepAgentState, 
-        executor: SandboxedExecutor, 
+        executor: Arc<dyn ToolExecutor>, 
         memory_controller: Arc<ResilientMemoryController<FileStorage>>
     ) -> Self {
         Self { harness, state, executor, memory_controller }
@@ -106,6 +106,7 @@ impl DeepAgent {
                 let req = Request {
                     prompt: if turn_count == 1 { user_input.clone() } else { "Continue".to_string() },
                     context: self.state.context.clone(), // Cheap Arc clone
+                    tools: vec![],
                 };
 
                 let mut stream = self.harness.run_stream(req).await?;
@@ -162,19 +163,7 @@ impl DeepAgent {
                     
                     self.harness.run_before_tool_hooks(&mut tool).await?;
                     
-                    let args_vec: Vec<String> = if let Some(obj) = tool.arguments.as_object() {
-                        obj.values().map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Number(n) => n.to_string(),
-                            serde_json::Value::Bool(b) => b.to_string(),
-                            serde_json::Value::Null => String::new(),
-                            other => serde_json::to_string(other).unwrap_or_default(),
-                        }).collect()
-                    } else {
-                        vec![]
-                    };
-
-                    match self.executor.execute(&tool_name, args_vec).await {
+                    match self.executor.execute(&tool_name, tool.arguments.clone()).await {
                         Ok(mut result) => {
                             self.harness.run_after_tool_hooks(&tool, &mut result).await?;
                             yield AgentStepEvent::ToolFinished(tool_name.clone(), result.clone());

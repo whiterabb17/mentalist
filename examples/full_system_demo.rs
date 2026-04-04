@@ -114,11 +114,11 @@ async fn main() -> Result<()> {
         sandbox_root: std::env::current_dir()?,
     };
     
-    let executor = mentalist::executor::SandboxedExecutor::new(
+    let executor = Arc::new(mentalist::executor::SandboxedExecutor::new(
         mentalist::executor::ExecutionMode::Local,
         std::env::current_dir()?,
         Some(std::env::current_dir()?) // Local mode needs explicit vault
-    ).expect("Failed to create executor");
+    ).expect("Failed to create executor"));
 
     let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
 

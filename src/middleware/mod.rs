@@ -8,6 +8,7 @@ use mem_offloader::{OffloaderConfig, ToolOffloader};
 use mem_retriever::{MemoryRetriever, RuVectorStore};
 use ruvector_core::types::DistanceMetric;
 use std::sync::Arc;
+use crate::executor::ToolExecutor;
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
@@ -248,3 +249,23 @@ impl Middleware for MindPalaceMiddleware {
 }
 
 pub mod todo;
+
+/// Automatically discovers and injects tools from the executor into the AI request.
+pub struct ToolDiscoveryMiddleware {
+    pub executor: Arc<dyn ToolExecutor>,
+}
+
+impl ToolDiscoveryMiddleware {
+    pub fn new(executor: Arc<dyn ToolExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+#[async_trait]
+impl Middleware for ToolDiscoveryMiddleware {
+    async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
+        let tools = self.executor.list_tools().await?;
+        req.tools.extend(tools);
+        Ok(())
+    }
+}

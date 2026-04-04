@@ -35,6 +35,7 @@ async fn test_harness_lifecycle_basic() {
     let req = Request {
         prompt: "Hi".to_string(),
         context: Arc::new(Context { items: vec![] }),
+        tools: vec![],
     };
     
     let res = harness.run(req).await.unwrap();
@@ -66,6 +67,7 @@ async fn test_harness_middleware_execution() {
     let req = Request {
         prompt: "test".to_string(),
         context: Arc::new(Context { items: vec![] }),
+        tools: vec![],
     };
     
     let _ = harness.run(req).await.unwrap();

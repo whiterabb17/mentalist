@@ -1,6 +1,7 @@
-use mentalist::executor::{SandboxedExecutor, ExecutionMode};
+use mentalist::executor::{SandboxedExecutor, ExecutionMode, ToolExecutor};
 use std::path::PathBuf;
 use anyhow::Result;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     ];
 
     // 3. Execute
-    match executor.execute(cmd, args).await {
+    match executor.execute(cmd, json!(args)).await {
         Ok(output) => {
             println!("--- Tool Output ---");
             println!("{}", output);

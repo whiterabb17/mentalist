@@ -7,6 +7,18 @@ use futures_util::stream::StreamExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::collections::HashMap;
+use std::sync::Arc;
+use mem_core::ToolDefinition;
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait ToolExecutor: Send + Sync {
+    /// Executes a tool by name with specified JSON arguments.
+    async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String>;
+    
+    /// Lists all tools currently supported by this executor.
+    async fn list_tools(&self) -> Result<Vec<ToolDefinition>>;
+}
 
 /// Optional command validator to block malicious patterns.
 pub struct CommandValidator {
@@ -114,23 +126,52 @@ impl SandboxedExecutor {
             validator: CommandValidator::new_default(),
         })
     }
+}
 
-    pub async fn execute(&self, cmd: &str, args: Vec<String>) -> Result<String> {
-        self.validator.validate(cmd, &args)?;
+#[async_trait]
+impl ToolExecutor for SandboxedExecutor {
+    async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
+        let args_vec: Vec<String> = if let Some(obj) = args.as_object() {
+            obj.values().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            }).collect()
+        } else if let Some(arr) = args.as_array() {
+            arr.iter().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            }).collect()
+        } else {
+            vec![]
+        };
+
+        self.validator.validate(name, &args_vec)?;
 
         // If vault is set, we use it as the working directory / mount point for writes
         let working_dir = self.vault_dir.as_ref().unwrap_or(&self.root_dir);
 
         match &self.mode {
-            ExecutionMode::Local => self.execute_local(cmd, args, working_dir),
+            ExecutionMode::Local => self.execute_local(name, args_vec, working_dir),
             ExecutionMode::Docker { image, memory_limit, cpu_quota } => {
-                self.execute_docker(image, cmd, args, working_dir, *memory_limit, *cpu_quota).await
+                self.execute_docker(image, name, args_vec, working_dir, *memory_limit, *cpu_quota).await
             },
             ExecutionMode::Wasm { module_path, mount_root, env_vars } => {
-                self.execute_wasm(module_path.as_ref(), *mount_root, args, working_dir, env_vars).await
+                self.execute_wasm(module_path.as_ref(), *mount_root, args_vec, working_dir, env_vars).await
             },
         }
     }
+
+    async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
+        // For now, SandboxedExecutor doesn't explicitly expose its tools for discovery 
+        // as they are usually defined globally in the system prompt.
+        Ok(vec![])
+    }
+}
+
+impl SandboxedExecutor {
 
     fn execute_local(&self, cmd: &str, args: Vec<String>, working_dir: &Path) -> Result<String> {
         let output = Command::new(cmd)
@@ -358,5 +399,51 @@ impl SandboxedExecutor {
             }
         }
         Ok(())
+    }
+}
+
+/// Orchestrates multiple ToolExecutors.
+pub struct MultiExecutor {
+    pub executors: Vec<Arc<dyn ToolExecutor>>,
+}
+
+impl MultiExecutor {
+    pub fn new() -> Self {
+        Self { executors: Vec::new() }
+    }
+
+    pub fn add_executor(&mut self, executor: Arc<dyn ToolExecutor>) {
+        self.executors.push(executor);
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for MultiExecutor {
+    async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
+        let mut last_err = anyhow::anyhow!("No executor found for tool: {}", name);
+        
+        for exec in &self.executors {
+            let tools = exec.list_tools().await?;
+            if tools.iter().any(|t| t.name == name) {
+                return exec.execute(name, args).await;
+            }
+        }
+        
+        for exec in &self.executors {
+            match exec.execute(name, args.clone()).await {
+                Ok(res) => return Ok(res),
+                Err(e) => last_err = e,
+            }
+        }
+
+        Err(last_err)
+    }
+
+    async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
+        let mut all_tools = Vec::new();
+        for exec in &self.executors {
+            all_tools.extend(exec.list_tools().await?);
+        }
+        Ok(all_tools)
     }
 }

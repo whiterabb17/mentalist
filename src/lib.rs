@@ -3,6 +3,8 @@ pub use mem_core::{Context, Request, Response, ResponseChunk, ToolCall, ToolCall
 
 pub mod provider;
 pub mod executor;
+pub mod mcp;
+pub mod skills;
 pub mod middleware;
 pub mod agent;
 pub use agent::{DeepAgent, DeepAgentState};

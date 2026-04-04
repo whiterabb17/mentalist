@@ -20,6 +20,7 @@ mem-offloader = { path = "../mindpalace/crates/mem-offloader" }
 tokio = { version = "1", features = ["full", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
