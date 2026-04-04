@@ -494,7 +494,12 @@ impl ToolExecutor for MultiExecutor {
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
         let mut all_tools = Vec::new();
         for exec in &self.executors {
-            all_tools.extend(exec.list_tools().await?);
+            match exec.list_tools().await {
+                Ok(tools) => all_tools.extend(tools),
+                Err(e) => {
+                    tracing::warn!("Failed to list tools from an executor: {}", e);
+                }
+            }
         }
         Ok(all_tools)
     }

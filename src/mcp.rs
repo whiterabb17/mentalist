@@ -68,12 +68,23 @@ impl McpExecutor {
             cmd.args(&self.args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::piped())
                 .envs(&self.env);
             
-            let child = cmd.spawn()
+            let mut child = cmd.spawn()
                 .context(format!("Failed to start MCP server: {}", self.command))?;
             
+            // Redirect stderr to tracing in background
+            if let Some(stderr) = child.stderr.take() {
+                let cmd_name = self.command.clone();
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        tracing::warn!(target: "mentalist::mcp", "[{}] stderr: {}", cmd_name, line);
+                    }
+                });
+            }
+
             *child_guard = Some(child);
             
             // Drop guard to allow call_rpc to lock it
@@ -129,15 +140,27 @@ impl McpExecutor {
         stdin.flush().await?;
 
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        
-        if line.is_empty() {
-            *child_guard = None;
-            return Err(anyhow!("MCP server closed connection unexpectedly"));
-        }
+        // Skip non-JSON noise (like terminal welcome messages) until we find a valid JSON line
+        let response: JsonRpcResponse = loop {
+            line.clear();
+            reader.read_line(&mut line).await?;
+            
+            if line.is_empty() {
+                *child_guard = None;
+                return Err(anyhow!("MCP server closed connection unexpectedly"));
+            }
 
-        let response: JsonRpcResponse = serde_json::from_str(&line)
-            .context(format!("Failed to parse MCP response: {}", line))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() { continue; }
+            
+            // Try to parse as JSON-RPC response
+            if let Ok(res) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                break res;
+            } else {
+                // Not JSON-RPC, log as info and keep looking
+                tracing::info!(target: "mentalist::mcp", "[{}] stdout: {}", self.command, trimmed);
+            }
+        };
 
         if let Some(err) = response.error {
             return Err(anyhow!("MCP RPC Error ({}): {}", err.code, err.message));
@@ -200,13 +223,15 @@ impl BuiltinMcp {
     pub fn filesystem(paths: Vec<String>) -> McpExecutor {
         let mut args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
         args.extend(paths);
-        McpExecutor::new("npx".to_string(), args)
+        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+        McpExecutor::new(cmd.to_string(), args)
     }
 
     pub fn firecrawl(api_key: String) -> McpExecutor {
         let args = vec!["-y".to_string(), "firecrawl-mcp".to_string()];
         let mut env = HashMap::new();
         env.insert("FIRECRAWL_API_KEY".to_string(), api_key);
-        McpExecutor::new("npx".to_string(), args).with_env(env)
+        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+        McpExecutor::new(cmd.to_string(), args).with_env(env)
     }
 }

@@ -101,6 +101,7 @@ impl MindPalaceMiddleware {
         embeddings: Arc<dyn mem_core::EmbeddingProvider>,
         token_counter: Arc<dyn mem_core::TokenCounter>,
         session_id: String,
+        dimension: usize,
     ) -> Self {
         let config = mem_core::MindPalaceConfig::default();
         let mut brain = Brain::new(config.clone(), None, Some(token_counter));
@@ -112,24 +113,24 @@ impl MindPalaceMiddleware {
             "knowledge.json".to_string(),
             session_id.clone(),
         ));
-
+ 
         // 1. Efficiency: Tool Offloader
         brain.add_layer(Arc::new(ToolOffloader::new(
             storage.clone(),
             OffloaderConfig::default(),
         )));
-
+ 
         // 2. Intelligence: Reflection & Fact Extraction
         brain.add_layer(Arc::new(ReflectionLayer::new(extractor.clone())));
         brain.add_layer(extractor.clone());
-
+ 
         // 3. Coordination: Agent Bridge (Priority 7)
         let bridge = Arc::new(AgentBridge::new(storage.clone()));
         brain.add_layer(bridge.clone());
-
+ 
         // 4. Persistence: RuVector Index (SOTA Performance)
         let graph = Arc::new(mem_core::FactGraph::new(None).expect("Failed to init fact graph"));
-        let store = Arc::new(RuVectorStore::new(384, DistanceMetric::Cosine, graph.clone())); // Default 384 for Nomic/Ollama
+        let store = Arc::new(RuVectorStore::new(dimension, DistanceMetric::Cosine, graph.clone()));
         let retriever = MemoryRetriever::new(storage, embeddings, llm, store, graph);
 
         Self::new(Arc::new(brain), extractor, retriever, bridge, session_id)
