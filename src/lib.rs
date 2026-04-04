@@ -55,12 +55,16 @@ impl Harness {
         self.provider.stream_complete(req).await
     }
 
-    /// Helper for executed tool hooks (to be used by the Agent loop).
-    pub async fn run_tool_hooks(&self, tool: &mut ToolCall, result: &mut String) -> anyhow::Result<()> {
+    /// Helper for executed tool hooks (before).
+    pub async fn run_before_tool_hooks(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
         for mw in &self.middlewares {
             mw.before_tool_call(tool).await?;
         }
-        
+        Ok(())
+    }
+
+    /// Helper for executed tool hooks (after).
+    pub async fn run_after_tool_hooks(&self, tool: &ToolCall, result: &mut String) -> anyhow::Result<()> {
         for mw in &self.middlewares {
             mw.after_tool_call(tool, result).await?;
         }

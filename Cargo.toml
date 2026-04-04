@@ -4,6 +4,9 @@ version = "0.2.0"
 edition = "2021"
 authors = ["MindPalace Authors"]
 license = "MIT"
+[features]
+default = []
+wasm-tools = []
 
 [dependencies]
 mem-core = { path = "../mindpalace/crates/mem-core" }

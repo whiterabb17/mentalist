@@ -125,7 +125,22 @@ impl MindPalaceMiddleware {
 #[async_trait]
 impl Middleware for MindPalaceMiddleware {
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
-        // High-Precision RAG Fact Injection
+        // 1. Proactive Extraction: Learn from User input immediately
+        let user_context = Context {
+            items: vec![MemoryItem {
+                role: MemoryRole::User,
+                content: req.prompt.clone(),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                metadata: serde_json::json!({}),
+            }],
+        };
+        let user_facts = self.extractor.extract_facts(&user_context).await?;
+        if !user_facts.is_empty() {
+            self.extractor.commit_knowledge(user_facts).await?;
+            self.retriever.hydrate_from_kb(&self.extractor.knowledge_path).await?;
+        }
+
+        // 2. High-Precision RAG: Use recent context + prompt for query
         let facts = self
             .retriever
             .retrieve_relevant_facts(&req.prompt, 5, None)
@@ -148,10 +163,10 @@ impl Middleware for MindPalaceMiddleware {
             });
         }
 
-        // Orchestrated 7-Layer Optimization (Hardened Logic)
+        // 3. Orchestrated 7-Layer Optimization (Hardened Logic)
         self.brain.optimize(&mut req.context).await?;
 
-        // Proactive token budget compaction check
+        // 4. Proactive token budget compaction check
         if let Some(counter) = &self.brain.token_counter {
             let current_tokens: usize = req
                 .context
@@ -167,6 +182,28 @@ impl Middleware for MindPalaceMiddleware {
             }
         }
 
+        Ok(())
+    }
+
+    async fn after_ai_call(&self, res: &mut Response) -> anyhow::Result<()> {
+        // Deductive Fact Extraction from AI's own response
+        let ai_context = Context {
+            items: vec![MemoryItem {
+                role: MemoryRole::Assistant,
+                content: res.content.clone(),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                metadata: serde_json::json!({}),
+            }],
+        };
+
+        let new_facts = self.extractor.extract_facts(&ai_context).await?;
+        if !new_facts.is_empty() {
+            tracing::info!("Extracted {} facts from AI response.", new_facts.len());
+            self.extractor.commit_knowledge(new_facts).await?;
+            self.retriever
+                .hydrate_from_kb(&self.extractor.knowledge_path)
+                .await?;
+        }
         Ok(())
     }
 
