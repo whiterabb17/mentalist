@@ -1,4 +1,7 @@
-// unused import removed
+//! # Mentalist
+//!
+//! A production-grade agentic framework for building resilient, stateful, and sandboxed AI agents.
+
 pub use mem_core::{Context, Request, Response, ResponseChunk, ToolCall, ToolCallDelta, ModelProvider};
 
 pub mod provider;
@@ -12,6 +15,10 @@ pub use agent::{DeepAgent, DeepAgentState};
 use std::sync::Arc;
 use futures_util::stream::{BoxStream, StreamExt};
 
+/// The central orchestration engine that manages the AI interaction lifecycle.
+///
+/// `Harness` wraps a `ModelProvider` and a sequence of `Middleware` hooks.
+/// It is responsible for orchestrating the reasoning loop and tool execution callbacks.
 pub struct Harness {
     pub provider: Box<dyn ModelProvider>,
     pub middlewares: Vec<Arc<dyn middleware::Middleware>>,
@@ -27,6 +34,7 @@ impl Harness {
 
     pub fn add_middleware(&mut self, middleware: Arc<dyn middleware::Middleware>) {
         self.middlewares.push(middleware);
+        self.middlewares.sort_by_key(|mw| mw.priority());
     }
 
     /// Orchestrated Execution Loop following DeepAgent methodology.

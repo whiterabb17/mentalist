@@ -1,0 +1,73 @@
+name: Mentalist Hardening CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-wasip1
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Wasm Tools
+        run: |
+          cd wasm_tools
+          cargo build --target wasm32-wasip1 --release
+
+      - name: Run Tests
+        run: cargo test --verbose
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check Formatting
+        run: cargo fmt -- --check
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Security Audit
+        run: cargo audit
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Build Wasm Tools
+        run: |
+          cd wasm_tools
+          cargo build --target wasm32-wasip1 --release
+      - name: Run Tarpaulin
+        run: cargo tarpaulin --out Xml
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

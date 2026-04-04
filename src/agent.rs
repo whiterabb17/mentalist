@@ -6,10 +6,15 @@ use std::path::PathBuf;
 use futures_util::{StreamExt, stream::BoxStream};
 use chrono::Utc;
 
+/// Persistent state for a DeepAgent session.
+///
+/// Contains the session ID, conversation context, and the sandbox root directory.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeepAgentState {
     pub session_id: String,
+    /// Shared pointer to the conversation history/context.
     pub context: Arc<Context>,
+    /// Root directory for local file operations and tool execution.
     pub sandbox_root: PathBuf,
 }
 
@@ -17,6 +22,7 @@ pub struct StepConfig {
     pub max_turns: usize,
     pub timeout_seconds: u64,
     pub fail_on_limit: bool,
+    pub max_retries: usize,
 }
 
 impl Default for StepConfig {
@@ -25,11 +31,40 @@ impl Default for StepConfig {
             max_turns: 10,
             timeout_seconds: 300,
             fail_on_limit: false,
+            max_retries: 3,
         }
     }
 }
 
 /// The DeepAgent orchestrates the Model, Harness, and Executor into a single stateful entity.
+///
+/// It implements the "Deep Reasoning" loop where the model can call tools, process their results,
+/// and continue reasoning before providing a final response to the user.
+///
+/// # Example
+/// ```no_run
+/// use mentalist::{DeepAgent, DeepAgentState, Harness, provider::OpenAIProvider};
+/// use mentalist::executor::{SandboxedExecutor, ExecutionMode};
+/// use std::sync::Arc;
+/// use std::path::PathBuf;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let provider = Box::new(OpenAIProvider::new("gpt-4o".into(), "key".into()));
+/// let harness = Harness::new(provider);
+/// let state = DeepAgentState {
+///     session_id: "example".into(),
+///     context: Arc::new(Default::default()),
+///     sandbox_root: PathBuf::from("./sandbox"),
+/// };
+/// let executor = Arc::new(SandboxedExecutor::new(ExecutionMode::Local, PathBuf::from("./"), None)?);
+/// let memory = Arc::new(Default::default()); // Mock or real ResilientMemoryController
+///
+/// let mut agent = DeepAgent::new(harness, state, executor, memory);
+/// let response = agent.step("Calculate 123 * 456".into()).await?;
+/// println!("Agent says: {}", response);
+/// # Ok(())
+/// # }
+/// ```
 pub struct DeepAgent {
     pub harness: Harness,
     pub state: DeepAgentState,
@@ -163,7 +198,36 @@ impl DeepAgent {
                     
                     self.harness.run_before_tool_hooks(&mut tool).await?;
                     
-                    match self.executor.execute(&tool_name, tool.arguments.clone()).await {
+                    let mut retry_count = 0;
+                    let result = loop {
+                        match self.executor.execute(&tool_name, tool.arguments.clone()).await {
+                            Ok(res) => break Ok(res),
+                            Err(e) => {
+                                let err_msg = format!("Tool error: {}", e);
+                                
+                                // Categorize error for smarter retry logic
+                                let error_category = match e.to_string().to_lowercase() {
+                                    s if s.contains("timeout") => "transient_timeout",
+                                    s if s.contains("not found") => "tool_not_found",
+                                    s if s.contains("permission") || s.contains("denied") => "permission_denied",
+                                    _ => "unknown",
+                                };
+
+                                if error_category == "transient_timeout" && retry_count < config.max_retries {
+                                    retry_count += 1;
+                                    let backoff = 2u64.pow(retry_count as u32);
+                                    let msg = format!("Transient error detected ({}). Retrying in {}s (Attempt {}/{})", error_category, backoff, retry_count, config.max_retries);
+                                    yield AgentStepEvent::Status(msg);
+                                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                                    continue;
+                                }
+                                
+                                break Err((err_msg, error_category));
+                            }
+                        }
+                    };
+
+                    match result {
                         Ok(mut result) => {
                             self.harness.run_after_tool_hooks(&tool, &mut result).await?;
                             yield AgentStepEvent::ToolFinished(tool_name.clone(), result.clone());
@@ -177,18 +241,9 @@ impl DeepAgent {
                             });
                             self.state.context = Arc::new(current_ctx);
                         }
-                        Err(e) => {
-                            let err_msg = format!("Tool error: {}", e);
+                        Err((err_msg, error_category)) => {
                             yield AgentStepEvent::Status(err_msg.clone());
                             
-                            // Categorize error for smarter retry logic
-                            let error_category = match e.to_string().to_lowercase() {
-                                s if s.contains("timeout") => "transient_timeout",
-                                s if s.contains("not found") => "tool_not_found",
-                                s if s.contains("permission") || s.contains("denied") => "permission_denied",
-                                _ => "unknown",
-                            };
-
                             let mut current_ctx = (*self.state.context).clone();
                             current_ctx.items.push(mem_core::MemoryItem {
                                 role: mem_core::MemoryRole::Tool,

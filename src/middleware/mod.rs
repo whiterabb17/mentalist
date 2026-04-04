@@ -15,6 +15,9 @@ pub trait Middleware: Send + Sync {
     /// Returns a human-readable name for the middleware, used in diagnostic contexts.
     fn name(&self) -> &str { "Middleware" }
 
+    /// Returns the execution priority. Lower values run first. Default is 10.
+    fn priority(&self) -> i32 { 10 }
+
     /// Fires before the prompt reaches the LLM.
     async fn before_ai_call(&self, _req: &mut Request) -> anyhow::Result<()> {
         Ok(())

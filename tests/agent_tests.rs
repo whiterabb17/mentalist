@@ -126,3 +126,129 @@ async fn test_agent_error_categorization_not_found() {
     let tool_item = agent.state.context.items.iter().find(|i| i.role == MemoryRole::Tool).unwrap();
     assert_eq!(tool_item.metadata["error_category"], "tool_not_found");
 }
+
+#[tokio::test]
+async fn test_timeout_protection() {
+    let provider = Box::new(MockToolModel { tool_name: "test_tool".into() });
+    let harness = Harness::new(provider);
+    let executor = Arc::new(MockErrorExecutor { error_msg: "Connection timeout while calling tool".into() });
+    
+    let storage = FileStorage::new(PathBuf::from("/tmp/mentalist_test3"));
+    let brain = Arc::new(brain::Brain::new(mem_core::MindPalaceConfig::default(), None, None));
+    let memory_controller = Arc::new(ResilientMemoryController::new(brain, storage, 3));
+
+    let state = DeepAgentState {
+        session_id: "test3".into(),
+        context: Arc::new(Context { items: vec![] }),
+        sandbox_root: PathBuf::from("."),
+    };
+
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let _ = agent.step("run".into()).await.unwrap();
+    
+    // Verify categorization
+    let tool_item = agent.state.context.items.iter().find(|i| i.role == MemoryRole::Tool).unwrap();
+    assert_eq!(tool_item.metadata["error_category"], "transient_timeout");
+}
+
+#[tokio::test]
+async fn test_command_whitelist_enforcement() {
+    use mentalist::executor::{SandboxedExecutor, ExecutionMode};
+    
+    let temp_dir = std::env::temp_dir().join("mentalist_whitelist_test");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    
+    let executor = SandboxedExecutor::new(
+        ExecutionMode::Local,
+        temp_dir.clone(),
+        None
+    ).unwrap();
+    
+    // "rm" is not in the default whitelist
+    let result = executor.execute("rm", serde_json::json!({ "path": "/etc/passwd" })).await;
+    
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not in the whitelist"));
+    
+    std::fs::remove_dir_all(temp_dir).unwrap();
+}
+
+struct ErrorMiddleware;
+#[async_trait]
+impl mentalist::middleware::Middleware for ErrorMiddleware {
+    fn name(&self) -> &str { "ErrorMiddleware" }
+    async fn before_ai_call(&self, _req: &mut Request) -> anyhow::Result<()> {
+        anyhow::bail!("Middleware intentional failure")
+    }
+}
+
+#[tokio::test]
+async fn test_middleware_error_propagation() {
+    let provider = Box::new(MockToolModel { tool_name: "test_tool".into() });
+    let mut harness = Harness::new(provider);
+    harness.add_middleware(Arc::new(ErrorMiddleware));
+    
+    let executor = Arc::new(MockErrorExecutor { error_msg: "ok".into() });
+    
+    let storage = FileStorage::new(PathBuf::from("/tmp/mentalist_test4"));
+    let brain = Arc::new(brain::Brain::new(mem_core::MindPalaceConfig::default(), None, None));
+    let memory_controller = Arc::new(ResilientMemoryController::new(brain, storage, 3));
+
+    let state = DeepAgentState {
+        session_id: "test4".into(),
+        context: Arc::new(Context { items: vec![] }),
+        sandbox_root: PathBuf::from("."),
+    };
+
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let result = agent.step("run".into()).await;
+    
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Middleware 'ErrorMiddleware' failure"));
+}
+
+#[tokio::test]
+async fn test_wasm_execution_smoke() {
+    use mentalist::executor::{SandboxedExecutor, ExecutionMode};
+    use std::collections::HashMap;
+    
+    let temp_dir = std::env::temp_dir().join("mentalist_wasm_test");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    
+    // Path to the built wasm_tools binary
+    let wasm_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("wasm_tools")
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("release")
+        .join("wasm_tools.wasm");
+        
+    if !wasm_path.exists() {
+        // If not found (e.g. in CI or different env), we might need to skip or bail
+        // But since I just built it, it should be there.
+        panic!("Wasm binary not found at {:?}", wasm_path);
+    }
+    
+    let mut executor = SandboxedExecutor::new(
+        ExecutionMode::Wasm {
+            module_path: Some(wasm_path),
+            mount_root: true,
+            env_vars: HashMap::new(),
+        },
+        temp_dir.clone(),
+        None
+    ).unwrap();
+    executor.validator.allowed_cmds.push("stats".to_string());
+    
+    // Command for wasm_tools: stats <text>
+    // In SandboxedExecutor, 'name' is just an identifier, the real execution happens in execute_wasm
+    // Wait, SandboxedExecutor::execute uses 'name' as the first argument to the process/wasm
+    // Let's check how it's called in execute_wasm.
+    
+    let result = executor.execute("stats", serde_json::json!({ "text": "hello world" })).await.unwrap();
+    
+    assert!(result.contains("Chars: 11"));
+    assert!(result.contains("Words: 2"));
+    
+    std::fs::remove_dir_all(temp_dir).unwrap();
+}

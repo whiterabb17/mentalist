@@ -1,6 +1,6 @@
 [package]
 name = "mentalist"
-version = "0.2.8"
+version = "0.3.0"
 edition = "2021"
 authors = ["MindPalace Authors"]
 license = "MIT"
@@ -40,3 +40,11 @@ wasmtime = { version = "29.0", features = ["async"] }
 wasmtime-wasi = { version = "29.0", features = ["preview1"] }
 cap-std = "3.4"
 ruvector-core = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+brain = { path = "../mindpalace/crates/brain" }
+
+[[bench]]
+name = "bench_main"
+harness = false

@@ -60,18 +60,24 @@ impl CommandValidator {
     }
 }
 
-/// Execution mode for the DeepAgent harness.
+/// Execution mode for the DeepAgent harness, determining how tools are ran.
 #[derive(Debug, Clone)]
 pub enum ExecutionMode {
+    /// Tools are executed as local processes. Recommended for trusted environments only.
     Local,
+    /// Tools are executed inside a Docker container. Provides host OS isolation.
     Docker { 
         image: String,
         memory_limit: Option<i64>, // bytes
         cpu_quota: Option<i64>, // percentage * 1000
     },
+    /// Tools are executed as Wasm modules using `wasmtime`. Provides the highest level of isolation.
     Wasm {
+        /// Optional path to a specific Wasm module. If None, a default tool runner may be used.
         module_path: Option<PathBuf>,
+        /// Whether to mount the sandbox root directory to `/sandbox` in the Wasm instance.
         mount_root: bool,
+        /// Explicit environment variables to provide to the Wasm module.
         env_vars: HashMap<String, String>,
     },
 }
@@ -79,10 +85,17 @@ pub enum ExecutionMode {
 #[cfg(feature = "wasm-tools")]
 const DEFAULT_WASM: &[u8] = include_bytes!("resources/tool_runner.wasm");
 
+/// A security-hardened tool executor that supports various sandboxing levels.
+///
+/// `SandboxedExecutor` validates commands against a whitelist and ensures they do not
+/// perform forbidden operations like path traversal before executing them in the chosen `ExecutionMode`.
 pub struct SandboxedExecutor {
     pub mode: ExecutionMode,
+    /// The base directory for file operations.
     pub root_dir: PathBuf,
+    /// An optional staging area for file writes before they are "committed" to root_dir.
     pub vault_dir: Option<PathBuf>,
+    /// The validator used to check commands and arguments for safety.
     pub validator: CommandValidator,
 }
 
@@ -159,7 +172,9 @@ impl ToolExecutor for SandboxedExecutor {
                 self.execute_docker(image, name, args_vec, working_dir, *memory_limit, *cpu_quota).await
             },
             ExecutionMode::Wasm { module_path, mount_root, env_vars } => {
-                self.execute_wasm(module_path.as_ref(), *mount_root, args_vec, working_dir, env_vars).await
+                let mut wasm_args = vec!["tool_runtime".to_string(), name.to_string()];
+                wasm_args.extend(args_vec);
+                self.execute_wasm(module_path.as_ref(), *mount_root, wasm_args, working_dir, env_vars).await
             },
         }
     }
