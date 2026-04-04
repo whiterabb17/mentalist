@@ -43,13 +43,13 @@ impl Default for StepConfig {
 ///
 /// # Example
 /// ```no_run
-/// use mentalist::{DeepAgent, DeepAgentState, Harness, provider::OpenAIProvider};
+/// use mentalist::{DeepAgent, DeepAgentState, Harness, provider::OpenAiProvider};
 /// use mentalist::executor::{SandboxedExecutor, ExecutionMode};
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let provider = Box::new(OpenAIProvider::new("gpt-4o".into(), "key".into()));
+/// let provider = Box::new(OpenAiProvider::new("gpt-4o".into(), "key".into()));
 /// let harness = Harness::new(provider);
 /// let state = DeepAgentState {
 ///     session_id: "example".into(),
@@ -57,7 +57,10 @@ impl Default for StepConfig {
 ///     sandbox_root: PathBuf::from("./sandbox"),
 /// };
 /// let executor = Arc::new(SandboxedExecutor::new(ExecutionMode::Local, PathBuf::from("./"), None)?);
-/// let memory = Arc::new(Default::default()); // Mock or real ResilientMemoryController
+/// // For doctest purposes, we assume a correctly initialized controller.
+/// let brain = Arc::new(brain::Brain::new(mem_core::MindPalaceConfig::default(), None, None));
+/// let storage = mem_core::FileStorage::new(std::path::PathBuf::from("."));
+/// let memory = Arc::new(mem_resilience::ResilientMemoryController::new(brain, storage, 3));
 ///
 /// let mut agent = DeepAgent::new(harness, state, executor, memory);
 /// let response = agent.step("Calculate 123 * 456".into()).await?;
@@ -88,9 +91,8 @@ impl DeepAgent {
         let mut stream = Box::pin(self.step_stream(user_input, StepConfig::default()));
         
         while let Some(res) = stream.next().await {
-            match res? {
-                AgentStepEvent::TextChunk(c) => full_content.push_str(&c),
-                _ => (),
+            if let AgentStepEvent::TextChunk(c) = res? {
+                full_content.push_str(&c)
             }
         }
         Ok(full_content)
@@ -167,16 +169,14 @@ impl DeepAgent {
                         }
                     }
 
-                    if chunk.is_final {
-                        if !current_tool_name.is_empty() {
-                            let arguments: serde_json::Value = serde_json::from_str(&current_tool_args)
-                                .map_err(|e| {
-                                    tracing::error!("Failed to parse tool arguments: {}. Raw: {}", e, current_tool_args);
-                                    anyhow::anyhow!("Tool argument JSON parse error: {} for args: {}", e, current_tool_args)
-                                })?;
-                            tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
-                            current_tool_args.clear();
-                        }
+                    if chunk.is_final && !current_tool_name.is_empty() {
+                        let arguments: serde_json::Value = serde_json::from_str(&current_tool_args)
+                            .map_err(|e| {
+                                tracing::error!("Failed to parse tool arguments: {}. Raw: {}", e, current_tool_args);
+                                anyhow::anyhow!("Tool argument JSON parse error: {} for args: {}", e, current_tool_args)
+                            })?;
+                        tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
+                        current_tool_args.clear();
                     }
                 }
 

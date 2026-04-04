@@ -454,13 +454,14 @@ impl SandboxedExecutor {
 }
 
 /// Orchestrates multiple ToolExecutors.
+#[derive(Default)]
 pub struct MultiExecutor {
     pub executors: Vec<Arc<dyn ToolExecutor>>,
 }
 
 impl MultiExecutor {
     pub fn new() -> Self {
-        Self { executors: Vec::new() }
+        Self::default()
     }
 
     pub fn add_executor(&mut self, executor: Arc<dyn ToolExecutor>) {

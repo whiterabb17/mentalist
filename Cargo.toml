@@ -9,13 +9,13 @@ default = []
 wasm-tools = []
 
 [dependencies]
-mem-core = { path = "../mindpalace/crates/mem-core" }
-brain = { path = "../mindpalace/crates/brain" }
-mem-resilience = { path = "../mindpalace/crates/mem-resilience" }
-mem-extractor = { path = "../mindpalace/crates/mem-extractor" }
-mem-retriever = { path = "../mindpalace/crates/mem-retriever" }
-mem-bridge = { path = "../mindpalace/crates/mem-bridge" }
-mem-offloader = { path = "../mindpalace/crates/mem-offloader" }
+mem-core = { git = "https://github.com/whiterabb17/mindpalace.git" }
+brain = { git = "https://github.com/whiterabb17/mindpalace.git" }
+mem-resilience = { git = "https://github.com/whiterabb17/mindpalace.git" }
+mem-extractor = { git = "https://github.com/whiterabb17/mindpalace.git" }
+mem-retriever = { git = "https://github.com/whiterabb17/mindpalace.git" }
+mem-bridge = { git = "https://github.com/whiterabb17/mindpalace.git" }
+mem-offloader = { git = "https://github.com/whiterabb17/mindpalace.git" }
 
 tokio = { version = "1", features = ["full", "fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -43,7 +43,7 @@ ruvector-core = "0.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
-brain = { path = "../mindpalace/crates/brain" }
+brain = { git = "https://github.com/whiterabb17/mindpalace.git" }
 
 [[bench]]
 name = "bench_main"

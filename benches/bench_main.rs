@@ -4,7 +4,6 @@ use mentalist::middleware::Middleware;
 use mentalist::executor::{SandboxedExecutor, ExecutionMode, ToolExecutor};
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::path::PathBuf;
 use futures_util::stream::{self, BoxStream};
 use tokio::runtime::Runtime;
 

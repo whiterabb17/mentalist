@@ -1,9 +1,8 @@
-use mentalist::{Harness, DeepAgent, DeepAgentState, Request, Response, ToolCall, ModelProvider, ResponseChunk, Context};
+use mentalist::{Harness, DeepAgentState, Request, Response, ToolCall, ModelProvider, ResponseChunk, Context};
 use mentalist::middleware::Middleware;
 use mentalist::executor::{SandboxedExecutor, ExecutionMode};
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::path::PathBuf;
 use futures_util::stream::{self, BoxStream};
 
 struct MockModel;
@@ -72,13 +71,13 @@ async fn main() -> anyhow::Result<()> {
     let temp_dir = std::env::current_dir()?.join(".agent_sandbox");
     std::fs::create_dir_all(&temp_dir)?;
 
-    let executor = Arc::new(SandboxedExecutor::new(
+    let _executor = Arc::new(SandboxedExecutor::new(
         ExecutionMode::Local,
         temp_dir.clone(),
         None
     )?);
 
-    let state = DeepAgentState {
+    let _state = DeepAgentState {
         session_id: "example_session".into(),
         context: Arc::new(Context { items: vec![] }),
         sandbox_root: temp_dir,
