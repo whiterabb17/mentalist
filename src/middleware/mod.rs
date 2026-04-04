@@ -12,6 +12,9 @@ use crate::executor::ToolExecutor;
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
+    /// Returns a human-readable name for the middleware, used in diagnostic contexts.
+    fn name(&self) -> &str { "Middleware" }
+
     /// Fires before the prompt reaches the LLM.
     async fn before_ai_call(&self, _req: &mut Request) -> anyhow::Result<()> {
         Ok(())
@@ -50,6 +53,8 @@ impl SafetyMiddleware {
 
 #[async_trait]
 impl Middleware for SafetyMiddleware {
+    fn name(&self) -> &str { "Safety" }
+
     async fn before_tool_call(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
         if self.forbidden_tools.contains(&tool.name) {
             anyhow::bail!("Security: Tool '{}' is forbidden by SafetyMiddleware.", tool.name);
@@ -130,6 +135,8 @@ impl MindPalaceMiddleware {
 
 #[async_trait]
 impl Middleware for MindPalaceMiddleware {
+    fn name(&self) -> &str { "MindPalace" }
+
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         // 1. Proactive Extraction: Learn from User input immediately
         let user_context = Context {
@@ -263,9 +270,65 @@ impl ToolDiscoveryMiddleware {
 
 #[async_trait]
 impl Middleware for ToolDiscoveryMiddleware {
+    fn name(&self) -> &str { "ToolDiscovery" }
+
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         let tools = self.executor.list_tools().await?;
         req.tools.extend(tools);
+        Ok(())
+    }
+}
+
+/// Comprehensive, production-ready logging middleware that uses the tracing crate.
+pub struct LoggingMiddleware;
+
+#[async_trait]
+impl Middleware for LoggingMiddleware {
+    fn name(&self) -> &str { "Logging" }
+
+    async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
+        tracing::info!(
+            target: "mentalist::logging_mw",
+            "AI Call Starting | Prompt: {:.50}... | Context Items: {}", 
+            req.prompt, req.context.items.len()
+        );
+        Ok(())
+    }
+
+    async fn after_ai_call(&self, res: &mut Response) -> anyhow::Result<()> {
+        tracing::info!(
+            target: "mentalist::logging_mw",
+            "AI Call Finished | Response: {:.50}... | Tool Calls: {}", 
+            res.content, res.tool_calls.len()
+        );
+        Ok(())
+    }
+
+    async fn before_tool_call(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
+        let args_json = serde_json::to_string(&tool.arguments).unwrap_or_else(|_| "INVALID_ARGS".into());
+        tracing::info!(
+            target: "mentalist::logging_mw",
+            "Tool Call Starting | Name: {} | Args: {}", 
+            tool.name, args_json
+        );
+        Ok(())
+    }
+
+    async fn after_tool_call(&self, tool: &ToolCall, result: &mut String) -> anyhow::Result<()> {
+        tracing::info!(
+            target: "mentalist::logging_mw",
+            "Tool Call Finished | Name: {} | Result size: {} chars", 
+            tool.name, result.len()
+        );
+        Ok(())
+    }
+
+    async fn optimize_context(&self, ctx: &mut Context) -> anyhow::Result<()> {
+        tracing::info!(
+            target: "mentalist::logging_mw",
+            "Context Optimization Requested | Current Items: {}", 
+            ctx.items.len()
+        );
         Ok(())
     }
 }

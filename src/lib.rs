@@ -34,9 +34,9 @@ impl Harness {
         // 1. Hook: before_ai_call (Context Optimization/Planning)
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
-                let _mw_name = "Middleware"; // Better: mw.name() if added to trait
-                tracing::error!("Middleware failure in before_ai_call: {}", e);
-                return Err(e.context(format!("Middleware failure in before_ai_call")));
+                let mw_name = mw.name();
+                tracing::error!("Middleware '{}' failure in before_ai_call: {}", mw_name, e);
+                return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
             }
         }
 
@@ -46,8 +46,9 @@ impl Harness {
         // 3. Hook: after_ai_call (Response Parsing/Intent Extraction)
         for mw in &self.middlewares {
             if let Err(e) = mw.after_ai_call(&mut res).await {
-                tracing::error!("Middleware failure in after_ai_call: {}", e);
-                return Err(e.context(format!("Middleware failure in after_ai_call")));
+                let mw_name = mw.name();
+                tracing::error!("Middleware '{}' failure in after_ai_call: {}", mw_name, e);
+                return Err(e.context(format!("Middleware '{}' failure in after_ai_call", mw_name)));
             }
         }
 
@@ -59,8 +60,9 @@ impl Harness {
         // 1. Hook: before_ai_call
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
-                tracing::error!("Middleware failure in before_ai_call: {}", e);
-                return Err(e.context("Middleware failure in before_ai_call"));
+                let mw_name = mw.name();
+                tracing::error!("Middleware '{}' failure in before_ai_call: {}", mw_name, e);
+                return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
             }
         }
 
@@ -90,7 +92,7 @@ impl Harness {
             // 3. Hook: after_ai_call (Response Processing)
             for mw in &middlewares {
                 if let Err(e) = mw.after_ai_call(&mut full_response).await {
-                    tracing::error!("Middleware failure in after_ai_call (streaming): {}", e);
+                    tracing::error!("Middleware '{}' failure in after_ai_call (streaming): {}", mw.name(), e);
                     // We don't bail the stream here as it's already finished, but we log
                 }
             }
@@ -102,7 +104,11 @@ impl Harness {
     /// Helper for executed tool hooks (before).
     pub async fn run_before_tool_hooks(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
         for mw in &self.middlewares {
-            mw.before_tool_call(tool).await?;
+            if let Err(e) = mw.before_tool_call(tool).await {
+                let mw_name = mw.name();
+                tracing::error!("Middleware '{}' failure in before_tool_call: {}", mw_name, e);
+                return Err(e.context(format!("Middleware '{}' failure in before_tool_call", mw_name)));
+            }
         }
         Ok(())
     }
@@ -110,7 +116,11 @@ impl Harness {
     /// Helper for executed tool hooks (after).
     pub async fn run_after_tool_hooks(&self, tool: &ToolCall, result: &mut String) -> anyhow::Result<()> {
         for mw in &self.middlewares {
-            mw.after_tool_call(tool, result).await?;
+            if let Err(e) = mw.after_tool_call(tool, result).await {
+                let mw_name = mw.name();
+                tracing::error!("Middleware '{}' failure in after_tool_call: {}", mw_name, e);
+                return Err(e.context(format!("Middleware '{}' failure in after_tool_call", mw_name)));
+            }
         }
         Ok(())
     }
@@ -118,7 +128,11 @@ impl Harness {
     /// Triggers manual context optimization/summarization across all middlewares.
     pub async fn optimize_context(&self, ctx: &mut Context) -> anyhow::Result<()> {
         for mw in &self.middlewares {
-            mw.optimize_context(ctx).await?;
+            if let Err(e) = mw.optimize_context(ctx).await {
+                let mw_name = mw.name();
+                tracing::error!("Middleware '{}' failure in optimize_context: {}", mw_name, e);
+                return Err(e.context(format!("Middleware '{}' failure in optimize_context", mw_name)));
+            }
         }
         Ok(())
     }

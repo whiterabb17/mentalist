@@ -181,12 +181,24 @@ impl DeepAgent {
                             let err_msg = format!("Tool error: {}", e);
                             yield AgentStepEvent::Status(err_msg.clone());
                             
+                            // Categorize error for smarter retry logic
+                            let error_category = match e.to_string().to_lowercase() {
+                                s if s.contains("timeout") => "transient_timeout",
+                                s if s.contains("not found") => "tool_not_found",
+                                s if s.contains("permission") || s.contains("denied") => "permission_denied",
+                                _ => "unknown",
+                            };
+
                             let mut current_ctx = (*self.state.context).clone();
                             current_ctx.items.push(mem_core::MemoryItem {
                                 role: mem_core::MemoryRole::Tool,
                                 content: err_msg,
                                 timestamp: Utc::now().timestamp() as u64,
-                                metadata: serde_json::json!({"tool": tool_name, "error": true}),
+                                metadata: serde_json::json!({
+                                    "tool": tool_name, 
+                                    "error": true,
+                                    "error_category": error_category 
+                                }),
                             });
                             self.state.context = Arc::new(current_ctx);
                         }

@@ -24,6 +24,8 @@ impl TodoMiddleware {
 
 #[async_trait]
 impl Middleware for TodoMiddleware {
+    fn name(&self) -> &str { "Todo" }
+
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         // Pillar: Explicit Planning
         // Inject the current agent-compatible Markdown plan into the prompt.

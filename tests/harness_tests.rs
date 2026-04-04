@@ -119,3 +119,52 @@ async fn test_harness_tool_hooks() {
     harness.run_after_tool_hooks(&tool, &mut result).await.unwrap();
     assert!(*ac.lock().await);
 }
+
+#[tokio::test]
+async fn test_harness_middleware_naming() {
+    use mentalist::middleware::Middleware;
+    
+    struct NamedMiddleware;
+    #[async_trait]
+    impl Middleware for NamedMiddleware {
+        fn name(&self) -> &str { "CustomSpy" }
+        async fn before_ai_call(&self, _req: &mut Request) -> anyhow::Result<()> {
+            anyhow::bail!("Intentional Failure")
+        }
+    }
+    
+    let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
+    let mut harness = Harness::new(provider);
+    harness.add_middleware(Arc::new(NamedMiddleware));
+    
+    let req = Request {
+        prompt: "test".to_string(),
+        context: Arc::new(Context { items: vec![] }),
+        tools: vec![],
+    };
+    
+    let res = harness.run(req).await;
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err().to_string();
+    // Verify that the middleware name is captured in the error context
+    assert!(err_msg.contains("'CustomSpy'"));
+}
+
+#[tokio::test]
+async fn test_logging_middleware_invocation() {
+    // This mostly verifies it doesn't crash, as tracing is hard to capture in unit tests without specialized subscribers
+    use mentalist::middleware::LoggingMiddleware;
+    
+    let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
+    let mut harness = Harness::new(provider);
+    harness.add_middleware(Arc::new(LoggingMiddleware));
+    
+    let req = Request {
+        prompt: "test".to_string(),
+        context: Arc::new(Context { items: vec![] }),
+        tools: vec![],
+    };
+    
+    let res = harness.run(req).await;
+    assert!(res.is_ok());
+}

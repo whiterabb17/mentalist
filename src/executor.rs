@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use bollard::container::{Config, LogOutput};
 use bollard::image::CreateImageOptions;
 use bollard::models::HostConfig;
@@ -33,7 +33,7 @@ impl CommandValidator {
                 "bash".to_string(), "sh".to_string(), "cat".to_string(), 
                 "ls".to_string(), "grep".to_string(), "jq".to_string(), 
                 "curl".to_string(), "wget".to_string(), "tar".to_string(), 
-                "zip".to_string(), "find".to_string()
+                "zip".to_string(), "find".to_string(), "echo".to_string()
             ],
         }
     }
@@ -174,19 +174,55 @@ impl ToolExecutor for SandboxedExecutor {
 impl SandboxedExecutor {
 
     fn execute_local(&self, cmd: &str, args: Vec<String>, working_dir: &Path) -> Result<String> {
-        let output = Command::new(cmd)
-            .args(args)
-            .current_dir(working_dir)
-            .env_clear()
-            .output()
-            .context("Local tool execution failed")?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).to_string();
-            bail!("Tool execution failed: {}", err);
+        let mut commands_to_try = vec![cmd.to_string()];
+        
+        // Add common fallbacks for portability
+        match cmd {
+            "python" => commands_to_try.push("python3".to_string()),
+            "python3" => commands_to_try.push("python".to_string()),
+            "pip" => commands_to_try.push("pip3".to_string()),
+            "pip3" => commands_to_try.push("pip".to_string()),
+            "node" => commands_to_try.push("nodejs".to_string()),
+            _ => {}
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        // Essential environment variables for tool initialization (e.g., Python on Windows)
+        let mut safe_env = HashMap::new();
+        let essential_vars = ["PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE"];
+        for var in essential_vars {
+            if let Ok(val) = std::env::var(var) {
+                safe_env.insert(var.to_string(), val);
+            }
+        }
+
+        let mut last_error = None;
+        for attempt_cmd in commands_to_try {
+            let result = Command::new(&attempt_cmd)
+                .args(&args)
+                .current_dir(working_dir)
+                .env_clear()
+                .envs(&safe_env)
+                .output();
+
+            match result {
+                Ok(output) => {
+                    if !output.status.success() {
+                        let err = String::from_utf8_lossy(&output.stderr).to_string();
+                        bail!("Tool execution failed ({}): {}", attempt_cmd, err);
+                    }
+                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    last_error = Some(e);
+                    continue; // Try next fallback
+                }
+                Err(e) => {
+                    bail!("Local tool execution critical failure ({}): {}", attempt_cmd, e);
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Local tool execution failed: program not found (last tried: {}). Original error: {:?}", cmd, last_error))
     }
 
     async fn execute_wasm(
