@@ -4,6 +4,8 @@ version = "0.3.1"
 edition = "2021"
 authors = ["MindPalace Authors"]
 license = "MIT"
+rust-version = "1.70"
+
 [features]
 default = []
 wasm-tools = []
@@ -17,34 +19,41 @@ mem-retriever = { git = "https://github.com/whiterabb17/mindpalace.git" }
 mem-bridge = { git = "https://github.com/whiterabb17/mindpalace.git" }
 mem-offloader = { git = "https://github.com/whiterabb17/mindpalace.git" }
 
-tokio = { version = "1", features = ["full", "fs"] }
-serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.40", features = ["rt", "fs", "sync", "macros"] }
+serde = { version = "1.0.200", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-anyhow = "1"
+anyhow = "1.0.86"
 thiserror = "1"
 tracing = "0.1"
 async-trait = "0.1"
 async-recursion = "1"
-shlex = "1.3"
 chrono = "0.4"
-tracing-subscriber = "0.3"
-clap = { version = "4.4", features = ["derive"] }
-colored = "2.1"
-bollard = "0.18"
+bollard = "0.20"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 async-stream = "0.3"
-wasmtime = { version = "29.0", features = ["async"] }
-wasmtime-wasi = { version = "29.0", features = ["preview1"] }
-cap-std = "3.4"
-ruvector-core = "0.1"
+wasmtime = { version = "36.0.6", features = ["async"] }
+wasmtime-wasi = { version = "36.0.6", features = ["preview1"] }
+ruvector-core = "2.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 brain = { git = "https://github.com/whiterabb17/mindpalace.git" }
+clap = { version = "4.4", features = ["derive"] }
+colored = "2.1"
+tracing-subscriber = "0.3"
 
 [[bench]]
 name = "bench_main"
 harness = false
+
+[patch."https://github.com/whiterabb17/mindpalace.git"]
+mem-core = { path = "../mindpalace/crates/mem-core" }
+brain = { path = "../mindpalace/crates/brain" }
+mem-resilience = { path = "../mindpalace/crates/mem-resilience" }
+mem-extractor = { path = "../mindpalace/crates/mem-extractor" }
+mem-retriever = { path = "../mindpalace/crates/mem-retriever" }
+mem-bridge = { path = "../mindpalace/crates/mem-bridge" }
+mem-offloader = { path = "../mindpalace/crates/mem-offloader" }

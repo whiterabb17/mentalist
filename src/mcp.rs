@@ -40,7 +40,19 @@ pub struct McpExecutor {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     process: Arc<Mutex<Option<Child>>>,
+    stdio: Arc<Mutex<Option<(tokio::process::ChildStdin, tokio::io::BufReader<tokio::process::ChildStdout>)>>>,
+    call_lock: Arc<Mutex<()>>,
     id_counter: AtomicI64,
+}
+
+impl Drop for McpExecutor {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.process.try_lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.start_kill();
+            }
+        }
+    }
 }
 
 impl McpExecutor {
@@ -50,6 +62,8 @@ impl McpExecutor {
             args,
             env: HashMap::new(),
             process: Arc::new(Mutex::new(None)),
+            stdio: Arc::new(Mutex::new(None)),
+            call_lock: Arc::new(Mutex::new(())),
             id_counter: AtomicI64::new(1),
         }
     }
@@ -59,7 +73,7 @@ impl McpExecutor {
         self
     }
 
-    async fn ensure_process(&self) -> Result<()> {
+    async fn ensure_process_locked(&self) -> Result<()> {
         let mut child_guard = self.process.lock().await;
         if child_guard.is_none() {
             tracing::info!("Starting MCP server: {} {:?}", self.command, self.args);
@@ -74,7 +88,6 @@ impl McpExecutor {
             let mut child = cmd.spawn()
                 .context(format!("Failed to start MCP server: {}", self.command))?;
             
-            // Redirect stderr to tracing in background
             if let Some(stderr) = child.stderr.take() {
                 let cmd_name = self.command.clone();
                 tokio::spawn(async move {
@@ -85,48 +98,60 @@ impl McpExecutor {
                 });
             }
 
+            let stdin = child.stdin.take().context("Failed to open stdin")?;
+            let stdout = child.stdout.take().context("Failed to open stdout")?;
+
+            let mut stdio_guard = self.stdio.lock().await;
+            *stdio_guard = Some((stdin, BufReader::new(stdout)));
+
             *child_guard = Some(child);
             
-            // Drop guard to allow call_rpc to lock it
-            drop(child_guard);
-            
-            // Perform initialization handshake
-            self.initialize().await?;
+            let init_future = async {
+                let params = serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "Mentalist",
+                        "version": "0.3.0"
+                    }
+                });
+                self.raw_call_locked("initialize", params).await
+            };
+
+            let res = tokio::time::timeout(std::time::Duration::from_secs(10), init_future).await;
+            match res {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    *stdio_guard = None;
+                    if let Some(mut c) = child_guard.take() {
+                        let _ = c.start_kill();
+                    }
+                    return Err(e);
+                }
+                Err(_) => {
+                    *stdio_guard = None;
+                    if let Some(mut c) = child_guard.take() {
+                        let _ = c.start_kill();
+                    }
+                    return Err(anyhow!("MCP initialization timeout"));
+                }
+            }
         }
         Ok(())
     }
 
-    async fn initialize(&self) -> Result<()> {
-        let params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "Mentalist",
-                "version": "0.3.0"
-            }
-        });
-        
-        // We use a "raw" call here if we wanted to avoid the recursion,
-        // but we can also just use the fact that we've already initialized to break the loop.
-        // For simplicity with the current structure, we'll implement a 'raw_call' that assumes process exists.
-        self.raw_call("initialize", params).await?;
-        Ok(())
-    }
-
     async fn call_rpc(&self, method: &str, params: Value) -> Result<Value> {
-        self.ensure_process().await?;
-        self.raw_call(method, params).await
+        let _guard = self.call_lock.lock().await;
+        self.ensure_process_locked().await?;
+        self.raw_call_locked(method, params).await
     }
 
-    async fn raw_call(&self, method: &str, params: Value) -> Result<Value> {
+    async fn raw_call_locked(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
         
-        let mut child_guard = self.process.lock().await;
-        let child = child_guard.as_mut().context("MCP Process not started")?;
-        
-        let stdin = child.stdin.as_mut().context("Failed to open stdin")?;
-        let stdout = child.stdout.as_mut().context("Failed to open stdout")?;
-        let mut reader = BufReader::new(stdout);
+        // Use persistent read/write buffers
+        let mut stdio_guard = self.stdio.lock().await;
+        let (stdin, reader) = stdio_guard.as_mut().context("MCP Process stdio not initialized")?;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -146,8 +171,14 @@ impl McpExecutor {
             reader.read_line(&mut line).await?;
             
             if line.is_empty() {
-                *child_guard = None;
-                return Err(anyhow!("MCP server closed connection unexpectedly"));
+                drop(stdio_guard);
+                let mut pguard = self.process.lock().await;
+                if let Some(mut child) = pguard.take() {
+                    let _ = child.start_kill();
+                }
+                let mut osguard = self.stdio.lock().await;
+                *osguard = None;
+                return Err(anyhow!("MCP server closed connection unexpectedly. Process cleaned up."));
             }
 
             let trimmed = line.trim();
@@ -162,11 +193,13 @@ impl McpExecutor {
             }
         };
 
-        if let Some(err) = response.error {
-            return Err(anyhow!("MCP RPC Error ({}): {}", err.code, err.message));
+        // Fix Issue #4: Dangerous Unwrap masking error body
+        match (response.result, response.error) {
+            (Some(result), None) => Ok(result),
+            (None, Some(err)) => Err(anyhow!("MCP RPC Error ({}): {}", err.code, err.message)),
+            (None, None) => Err(anyhow!("MCP protocol violation: no result or error")),
+            (Some(_), Some(_)) => Err(anyhow!("MCP protocol violation: both result and error")),
         }
-
-        Ok(response.result.unwrap_or(Value::Null))
     }
 }
 

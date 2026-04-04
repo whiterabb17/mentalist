@@ -84,5 +84,43 @@ fn bench_executor_efficiency(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_context_cloning, bench_middleware_overhead, bench_executor_efficiency);
+fn bench_docker_executor(c: &mut Criterion) {
+    c.bench_function("bench_docker_executor_stub", |b| b.iter(|| black_box(0)));
+}
+
+fn bench_wasm_executor(c: &mut Criterion) {
+    c.bench_function("bench_wasm_executor_stub", |b| b.iter(|| black_box(0)));
+}
+
+fn bench_json_parsing(c: &mut Criterion) {
+    c.bench_function("bench_json_parsing_stub", |b| b.iter(|| {
+        let text = r#"{"name": "test", "value": 123, "nested": {"key": "val"}}"#;
+        let _ = black_box(serde_json::from_str::<serde_json::Value>(text).unwrap());
+    }));
+}
+
+fn bench_retry_backoff(c: &mut Criterion) {
+    c.bench_function("bench_retry_backoff_stub", |b| b.iter(|| black_box(0)));
+}
+
+fn bench_stream_processing(c: &mut Criterion) {
+    c.bench_function("bench_stream_processing_stub", |b| b.iter(|| black_box(0)));
+}
+
+fn bench_mcp_latency(c: &mut Criterion) {
+    c.bench_function("bench_mcp_latency_stub", |b| b.iter(|| black_box(0)));
+}
+
+criterion_group!(
+    benches,
+    bench_context_cloning,
+    bench_middleware_overhead,
+    bench_executor_efficiency,
+    bench_docker_executor,
+    bench_wasm_executor,
+    bench_json_parsing,
+    bench_retry_backoff,
+    bench_stream_processing,
+    bench_mcp_latency
+);
 criterion_main!(benches);

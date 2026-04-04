@@ -1,0 +1,649 @@
+Dependency Version Management
+
+Location: Cargo.toml:20-42
+
+TOML
+tokio = { version = "1", features = ["full", "fs"] }  # ⚠️ "full" is expensive
+bollard = "0.18"                                        # ⚠️ Old version
+wasmtime = { version = "29.0", features = ["async"] }  # ⚠️ v29 is outdated
+Problems:
+
+tokio "full" feature - Includes unused features (metrics, rt-multi-thread, etc.)
+Outdated wasmtime - Latest is v30+, missing performance improvements
+No MSRV specified - Minimum Rust version unknown
+No version bounds - Allows breaking changes with cargo update
+Severity: 🟠 MAJOR
+
+Recommendation:
+
+TOML
+[package]
+# Add MSRV
+rust-version = "1.70"
+
+[dependencies]
+# Selective tokio features
+tokio = { version = "1.40", features = ["rt", "fs", "sync", "macros"] }
+
+# Update to latest
+wasmtime = { version = "30", features = ["async"] }
+wasmtime-wasi = { version = "30", features = ["preview1"] }
+bollard = "0.20"
+
+# Add bounds for safety
+serde = { version = "1.0.200", features = ["derive"] }
+anyhow = "1.0.86"
+Issue #3: Unnecessary/Risky Dependencies
+
+Location: Cargo.toml:20-42
+
+Dependency	Issue	Risk
+shlex	Unused in visible code	Remove
+colored	Only used in examples	Move to dev-deps
+clap	Only used in examples	Move to dev-deps
+cap-std	Added but never used	Remove
+tracing-subscriber	Not used in lib	Move to examples
+Severity: 🟡 MODERATE
+
+Fix:
+
+TOML
+[dependencies]
+# Core only
+tokio = { version = "1.40", features = ["rt", "fs", "sync", "macros"] }
+# ... rest ...
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+brain = { git = "https://github.com/whiterabb17/mindpalace.git" }
+clap = { version = "4.4", features = ["derive"] }
+colored = "2.1"
+tracing-subscriber = "0.3"
+2. MCP IMPLEMENTATION ISSUES 🔴 CRITICAL
+
+Issue #4: Unsafe JSON Unwrap in MCP
+
+Location: src/mcp.rs:169
+
+Rust
+Ok(response.result.unwrap_or(Value::Null))  // ⚠️ Dangerous
+Problem: While it has a fallback, this is inconsistent error handling. If result is None, it silently becomes Null, which could mask protocol violations.
+
+Better approach:
+
+Rust
+match (response.result, response.error) {
+    (Some(result), None) => Ok(result),
+    (None, Some(err)) => Err(anyhow!("MCP Error {}: {}", err.code, err.message)),
+    (None, None) => Err(anyhow!("MCP protocol violation: no result or error")),
+    (Some(_), Some(err)) => Err(anyhow!("MCP protocol violation: both result and error")),
+}
+Severity: 🔴 CRITICAL - Protocol violations silently become Null
+
+Issue #5: MCP Process Resource Leak
+
+Location: src/mcp.rs:62-96
+
+Rust
+async fn ensure_process(&self) -> Result<()> {
+    let mut child_guard = self.process.lock().await;
+    if child_guard.is_none() {
+        // ...
+        let mut child = cmd.spawn()
+            .context(format!("Failed to start MCP server: {}", self.command))?;
+        
+        // Stderr spawned as background task (fire-and-forget)
+        if let Some(stderr) = child.stderr.take() {
+            let cmd_name = self.command.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    tracing::warn!(target: "mentalist::mcp", "[{}] stderr: {}", cmd_name, line);
+                }
+            });
+        }
+        // ⚠️ No cleanup! Process never killed on drop
+    }
+    Ok(())
+}
+Problems:
+
+No process cleanup - MCP server continues running after McpExecutor dropped
+Background task leak - stderr reader task never terminates properly
+No timeout - Waiting for response could block forever
+Resource accumulation - Long-running app spawns zombies
+Severity: 🔴 CRITICAL - Resource leak in production
+
+Fix:
+
+Rust
+pub struct McpExecutor {
+    // ...
+    process: Arc<Mutex<Option<Child>>>,
+}
+
+impl Drop for McpExecutor {
+    fn drop(&mut self) {
+        // Synchronously kill process on drop
+        if let Ok(mut guard) = self.process.blocking_lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+// Add timeout
+async fn ensure_process(&self) -> Result<()> {
+    // ... existing code ...
+    
+    // Add initialization timeout
+    let init_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        self.initialize()
+    ).await;
+    
+    match init_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            *child_guard = None;
+            Err(anyhow!("MCP initialization timeout"))
+        }
+    }
+}
+Issue #6: MCP Raw Call Buffer Issues
+
+Location: src/mcp.rs:121-163
+
+Rust
+async fn raw_call(&self, method: &str, params: Value) -> Result<Value> {
+    let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
+    
+    let mut child_guard = self.process.lock().await;
+    let child = child_guard.as_mut().context("MCP Process not started")?;
+    
+    let stdin = child.stdin.as_mut().context("Failed to open stdin")?;
+    let stdout = child.stdout.as_mut().context("Failed to open stdout")?;
+    let mut reader = BufReader::new(stdout);  // ⚠️ Creates new reader each time!
+    
+    // Send request
+    let req_text = serde_json::to_string(&request)? + "\n";
+    stdin.write_all(req_text.as_bytes()).await?;
+    stdin.flush().await?;
+    
+    // Read response
+    let mut line = String::new();
+    let response: JsonRpcResponse = loop {
+        line.clear();
+        reader.read_line(&mut line).await?;
+        // ...
+    };
+}
+Problems:
+
+New BufReader each call - Throws away buffered data between calls
+Race condition - Multiple concurrent calls share stdout, responses mixed
+Dropped lines - Creating new reader loses previous buffered data
+Not thread-safe - stdout.as_mut() is borrowed mutably
+Severity: 🔴 CRITICAL - Race conditions in async calls
+
+Fix:
+
+Rust
+pub struct McpExecutor {
+    // ...
+    process: Arc<Mutex<Option<Child>>>,
+    reader: Arc<Mutex<Option<BufReader<...>>>>,  // Persistent reader
+    writer: Arc<Mutex<Option<...>>>,              // Persistent writer
+}
+
+async fn raw_call(&self, method: &str, params: Value) -> Result<Value> {
+    let mut reader_guard = self.reader.lock().await;
+    let mut writer_guard = self.writer.lock().await;
+    
+    let reader = reader_guard.as_mut().ok_or_else(|| anyhow!("Reader not initialized"))?;
+    let writer = writer_guard.as_mut().ok_or_else(|| anyhow!("Writer not initialized"))?;
+    
+    // ... use persistent reader/writer ...
+}
+3. SKILLS SYSTEM ISSUES 🟠 MAJOR
+
+Issue #7: Script Injection via Skill Names
+
+Location: src/skills.rs:101-126
+
+Rust
+let possible_scripts = [
+    format!("{}.sh", name),     // ⚠️ name not sanitized
+    format!("{}.py", name),
+    format!("{}.js", name),
+    // ...
+];
+
+for script_name in possible_scripts {
+    let script_path = scripts_dir.join(&script_name);
+    if script_path.exists() {
+        // ⚠️ Direct command execution without validation
+        if script_name.ends_with(".sh") {
+            let mut c = tokio::process::Command::new("bash");
+            c.arg(&script_path);  // Path not validated
+            c
+        }
+        // ...
+    }
+}
+Problems:
+
+Path traversal - Skill name like ../../../etc/passwd could escape
+No validation - Script name can contain shell metacharacters
+Symlink attacks - Malicious symlinks in skills directory
+No sandboxing - Scripts run with full process permissions
+Severity: 🔴 CRITICAL - Remote Code Execution
+
+Fix:
+
+Rust
+async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
+    // Validate skill name
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        anyhow::bail!("Invalid skill name: {} (only alphanumeric, _, - allowed)", name);
+    }
+    
+    let skill = self.skills.get(name)
+        .context(format!("Skill '{}' not found", name))?;
+    
+    // Validate path doesn't escape
+    let canonical_skill_path = skill.path.canonicalize()?;
+    let canonical_skills_root = self.skills_root.canonicalize()?;
+    
+    if !canonical_skill_path.starts_with(&canonical_skills_root) {
+        anyhow::bail!("Skill path escapes skills directory");
+    }
+    
+    let scripts_dir = canonical_skill_path.join("scripts");
+    if !scripts_dir.exists() {
+        return Ok(format!("Skill '{}' activated.", name));
+    }
+    
+    // Whitelist scripts
+    let allowed_scripts = ["run.sh", "run.py", "run.js"];
+    for script_name in allowed_scripts {
+        let script_path = scripts_dir.join(script_name);
+        if !script_path.exists() || !script_path.is_file() {
+            continue;
+        }
+        
+        // Verify it's not a symlink
+        if script_path.symlink_metadata()?.file_type().is_symlink() {
+            tracing::warn!("Skipping symlink script: {:?}", script_path);
+            continue;
+        }
+        
+        // Execute with timeout
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.execute_script(&script_path, script_name, &args)
+        ).await??;
+        
+        return Ok(output);
+    }
+    
+    Ok(format!("Skill '{}' activated.", name))
+}
+Issue #8: Skill Metadata Parse Failure Handling
+
+Location: src/skills.rs:67-89
+
+Rust
+async fn load_skill(&self, path: &Path) -> Result<Skill> {
+    let content = fs::read_to_string(path.join("SKILL.md")).await?;
+    
+    let (frontmatter, instructions) = if content.starts_with("---") {
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        if parts.len() == 3 {
+            (parts[1], parts[2].trim())
+        } else {
+            ("", content.trim())  // ⚠️ Silent fallback
+        }
+    } else {
+        ("", content.trim())
+    };
+
+    let metadata: SkillMetadata = serde_yaml::from_str(frontmatter)
+        .context("Failed to parse SKILL.md frontmatter")?;  // ⚠️ Empty frontmatter accepted
+    
+    Ok(Skill {
+        path: path.to_path_buf(),
+        metadata,
+        instructions: instructions.to_string(),
+    })
+}
+Problems:
+
+Empty frontmatter - serde_yaml::from_str("") creates default struct
+Missing validation - Doesn't verify required fields exist
+Silent degradation - Malformed YAML ignored if frontmatter empty
+Severity: 🟡 MODERATE
+
+Fix:
+
+Rust
+async fn load_skill(&self, path: &Path) -> Result<Skill> {
+    let content = fs::read_to_string(path.join("SKILL.md")).await?;
+    
+    let (frontmatter, instructions) = if content.starts_with("---") {
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        match parts.len() {
+            3 => (parts[1], parts[2].trim()),
+            _ => anyhow::bail!("Invalid SKILL.md frontmatter separator"),
+        }
+    } else {
+        anyhow::bail!("SKILL.md must start with --- for frontmatter");
+    };
+
+    if frontmatter.trim().is_empty() {
+        anyhow::bail!("Empty frontmatter in SKILL.md");
+    }
+
+    let metadata: SkillMetadata = serde_yaml::from_str(frontmatter)?;
+    
+    // Validate required fields
+    if metadata.name.is_empty() {
+        anyhow::bail!("Skill name is required");
+    }
+    if metadata.description.is_empty() {
+        anyhow::bail!("Skill description is required");
+    }
+    
+    Ok(Skill {
+        path: path.to_path_buf(),
+        metadata,
+        instructions: instructions.to_string(),
+    })
+}
+4. CI/CD & TESTING GAPS 🟠 MAJOR
+
+Issue #9: No GitHub Actions Workflow
+
+Location: .github/workflows/ (Empty)
+
+Problems:
+
+No automated testing - Tests run manually only
+No CI/CD pipeline - Can't deploy with confidence
+No security scanning - cargo audit never runs
+No code quality checks - Clippy warnings unchecked
+No documentation build - Docs never tested
+Severity: 🟠 MAJOR - Prevents professional deployment
+
+Recommendation: Create .github/workflows/ci.yml:
+
+YAML
+name: CI
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+    branches: [master, develop]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Check
+        run: cargo check --all-features
+      
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: Tests
+        run: cargo test --all-features --verbose
+      
+      - name: Docs
+        run: cargo doc --all-features --no-deps
+      
+      - name: Audit
+        run: cargo audit
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check-action@v1
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-tarpaulin
+      - run: cargo tarpaulin --out Xml
+      - uses: codecov/codecov-action@v3
+Issue #10: Incomplete Benchmark Suite
+
+Location: benches/bench_main.rs - Only 3 benchmarks
+
+Current benchmarks:
+
+context_cloning_100_items
+harness_run_10_middlewares
+executor_local_echo
+Missing critical benchmarks:
+
+Middleware chain overhead (N middlewares)
+Docker executor performance
+Wasm executor performance
+JSON parsing performance
+Error retry backoff timing
+Context optimization time
+Stream processing performance
+MCP RPC latency
+Severity: 🟡 MODERATE - Can't track regressions
+
+Fix: Expand benches/bench_main.rs:
+
+Rust
+criterion_group!(
+    benches,
+    bench_context_cloning,
+    bench_middleware_overhead,
+    bench_executor_efficiency,
+    bench_docker_executor,         // NEW
+    bench_wasm_executor,            // NEW
+    bench_json_parsing,             // NEW
+    bench_retry_backoff,            // NEW
+    bench_stream_processing,        // NEW
+    bench_mcp_latency,              // NEW
+);
+5. DOCUMENTATION GAPS 🟡 MODERATE
+
+Issue #11: Missing Documentation Files
+
+What exists:
+
+✅ docs/middleware_guide.md (2.4KB)
+✅ README.md (3.6KB, but outdated - version v0.2.7 vs v0.3.1)
+✅ Examples: 3 example files
+What's missing:
+
+❌ ARCHITECTURE.md - System design
+❌ SECURITY.md - Security model & guidelines
+❌ PERFORMANCE.md - Performance tuning
+❌ TROUBLESHOOTING.md - Common issues
+❌ CONTRIBUTING.md - Development guide
+❌ API.md - Complete API reference
+❌ EXECUTOR_MODES.md - Executor comparison
+❌ MCP_GUIDE.md - Model Context Protocol guide
+❌ CHANGELOG.md - Version history
+Severity: 🟡 MODERATE - Hurts adoption
+
+Issue #12: README Version Mismatch
+
+Location: README.md:1
+
+Markdown
+# Mentalist (v0.2.7)
+But Cargo.toml shows version = "0.3.1"
+
+Fix: Update README to match current version and latest features
+
+6. PERFORMANCE OPPORTUNITIES 🟡 MODERATE
+
+Issue #13: Excessive Cloning in Agent Loop
+
+Location: src/agent.rs:114-121, 184-191, 235-242, 247-258
+
+Rust
+let mut current_context = (*self.state.context).clone();  // O(n) clone!
+current_context.items.push(mem_core::MemoryItem { /* ... */ });
+self.state.context = Arc::new(current_context);  // Clone + Arc wrap
+Happens 4+ times per turn in reasoning loop!
+
+Problem: Multiple clones per step in what could be hot path
+
+Better approach:
+
+Rust
+// Use Arc::make_mut for copy-on-write
+let mut current_context = Arc::make_mut(&mut self.state.context);
+current_context.items.push(/* ... */);
+// Only clones if other Arc references exist
+Severity: 🟡 MODERATE - Performance degradation over long sessions
+
+Issue #14: BufReader Re-creation in MCP
+
+Location: src/mcp.rs:129
+
+Rust
+let mut reader = BufReader::new(stdout);  // ⚠️ New reader each call!
+Problem: Creates new buffer, losing any buffered data
+
+Fix: Use persistent BufReader (addressed in Issue #6)
+
+7. ERROR HANDLING GAPS 🟡 MODERATE
+
+Issue #15: SkillExecutor Script Not Found Logic
+
+Location: src/skills.rs:109-138
+
+Rust
+for script_name in possible_scripts {
+    let script_path = scripts_dir.join(&script_name);
+    if script_path.exists() {
+        // execute...
+        return Ok(output);
+    }
+}
+// Falls through silently if no scripts found
+Ok(format!("Skill '{}' activated. Instructions loaded into context.", name))
+Problem: If none of the standard scripts exist, silently returns success message
+
+Fix:
+
+Rust
+let mut found_script = false;
+for script_name in possible_scripts {
+    let script_path = scripts_dir.join(&script_name);
+    if script_path.exists() {
+        found_script = true;
+        // execute...
+        return Ok(output);
+    }
+}
+
+if !found_script {
+    anyhow::bail!(
+        "No executable script found in {:?}. Looked for: {:?}",
+        scripts_dir,
+        possible_scripts
+    );
+}
+Severity: 🟡 MODERATE - Silent failures
+
+8. CONCURRENCY & RACE CONDITIONS 🔴 CRITICAL
+
+Issue #16: McpExecutor Concurrent Call Race
+
+Location: src/mcp.rs:116-119
+
+Rust
+async fn call_rpc(&self, method: &str, params: Value) -> Result<Value> {
+    self.ensure_process().await?;
+    self.raw_call(method, params).await  // ⚠️ No synchronization!
+}
+Problem: Multiple concurrent call_rpc calls share stdout/stdin:
+
+Call A sends request, expecting response
+Call B sends request, response gets mixed
+Call A reads Call B's response
+Protocol violated
+Severity: 🔴 CRITICAL - Data corruption in async context
+
+Fix:
+
+Rust
+pub struct McpExecutor {
+    // ...
+    call_lock: Arc<Mutex<()>>,  // Serialize RPC calls
+}
+
+async fn call_rpc(&self, method: &str, params: Value) -> Result<Value> {
+    let _guard = self.call_lock.lock().await;  // One call at a time
+    self.ensure_process().await?;
+    self.raw_call(method, params).await
+}
+Issue #17: SkillExecutor Reload Race
+
+Location: src/skills.rs:42-64
+
+Rust
+pub async fn reload(&mut self) -> Result<()> {
+    if !self.skills_root.exists() {
+        return Ok(());
+    }
+
+    let mut read_dir = fs::read_dir(&self.skills_root).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        // ... load skills ...
+    }
+    Ok(())
+}
+Problem: If called while skills are being executed, concurrent modifications possible
+
+Severity: 🟡 MODERATE - Potential data race
+
+9. MISSING ERROR RECOVERY 🟡 MODERATE
+
+Issue #18: No Recovery from Corrupted MCP State
+
+Location: src/mcp.rs:149
+
+Rust
+if line.is_empty() {
+    *child_guard = None;  // ⚠️ Just sets to None, process still running
+    return Err(anyhow!("MCP server closed connection unexpectedly"));
+}
+Problem: If MCP closes unexpectedly, next call tries to restart but might fail
+
+Better:
+
+Rust
+if line.is_empty() {
+    // Kill the zombie process
+    if let Some(mut child) = child_guard.take() {
+        let _ = child.kill().await;
+    }
+    return Err(anyhow!("MCP server closed connection unexpectedly. Process cleaned up."));
+}

@@ -91,7 +91,8 @@ async fn main() -> Result<()> {
         mock_llm.clone(),
         mock_embeddings.clone(),
         mock_tokens.clone(),
-        session_id.clone()
+        session_id.clone(),
+        384
     );
 
     // 2. Resilience Setup
