@@ -151,6 +151,9 @@ impl Middleware for MindPalaceMiddleware {
             .retrieve_relevant_facts(&req.prompt, 5, None)
             .await?;
 
+        // Standard DeepAgent Methodology: Clone context for enrichment/optimization (Arc is immutable)
+        let mut current_context = (*req.context).clone();
+
         if !facts.is_empty() {
             let mut fact_content = String::from("### RELEVANT KNOWLEDGE ###\n");
             for (fact, score) in facts {
@@ -160,7 +163,7 @@ impl Middleware for MindPalaceMiddleware {
                 ));
             }
 
-            req.context.items.push(MemoryItem {
+            current_context.items.push(MemoryItem {
                 role: MemoryRole::System,
                 content: fact_content,
                 timestamp: chrono::Utc::now().timestamp() as u64,
@@ -169,7 +172,10 @@ impl Middleware for MindPalaceMiddleware {
         }
 
         // 3. Orchestrated 7-Layer Optimization (Hardened Logic)
-        self.brain.optimize(&mut req.context).await?;
+        self.brain.optimize(&mut current_context).await?;
+        
+        // Replace with optimized Arc
+        req.context = Arc::new(current_context);
 
         // 4. Proactive token budget compaction check
         if let Some(counter) = &self.brain.token_counter {

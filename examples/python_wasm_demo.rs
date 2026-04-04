@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
         },
         PathBuf::from("./"), // Project root
         None                 // vault_dir
-    );
+    ).expect("Failed to create Wasm executor");
 
     println!("🚀 Running Python via WebAssembly Sandbox...");
 

@@ -104,21 +104,21 @@ async fn main() -> Result<()> {
 
     // 3. Harness & Middlewares
     let mut harness = Harness::new(Box::new(MockProvider));
-    harness.add_middleware(Box::new(mp_middleware));
-    harness.add_middleware(Box::new(TodoMiddleware::new(std::env::current_dir()?.join(".agent/todo.md"))));
+    harness.add_middleware(Arc::new(mp_middleware));
+    harness.add_middleware(Arc::new(TodoMiddleware::new(std::env::current_dir()?.join(".agent/todo.md"))));
     
     // 4. Initial Agent Configuration
     let state = DeepAgentState {
         session_id,
-        context: Context { items: vec![] },
+        context: Arc::new(Context { items: vec![] }),
         sandbox_root: std::env::current_dir()?,
     };
     
     let executor = mentalist::executor::SandboxedExecutor::new(
         mentalist::executor::ExecutionMode::Local,
         std::env::current_dir()?,
-        None
-    );
+        Some(std::env::current_dir()?) // Local mode needs explicit vault
+    ).expect("Failed to create executor");
 
     let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
 

@@ -7,11 +7,12 @@ pub mod middleware;
 pub mod agent;
 pub use agent::{DeepAgent, DeepAgentState};
 
-use futures_util::stream::BoxStream;
+use std::sync::Arc;
+use futures_util::stream::{BoxStream, StreamExt};
 
 pub struct Harness {
     pub provider: Box<dyn ModelProvider>,
-    pub middlewares: Vec<Box<dyn middleware::Middleware>>,
+    pub middlewares: Vec<Arc<dyn middleware::Middleware>>,
 }
 
 impl Harness {
@@ -22,7 +23,7 @@ impl Harness {
         }
     }
 
-    pub fn add_middleware(&mut self, middleware: Box<dyn middleware::Middleware>) {
+    pub fn add_middleware(&mut self, middleware: Arc<dyn middleware::Middleware>) {
         self.middlewares.push(middleware);
     }
 
@@ -30,7 +31,11 @@ impl Harness {
     pub async fn run(&self, mut req: Request) -> anyhow::Result<Response> {
         // 1. Hook: before_ai_call (Context Optimization/Planning)
         for mw in &self.middlewares {
-            mw.before_ai_call(&mut req).await?;
+            if let Err(e) = mw.before_ai_call(&mut req).await {
+                let _mw_name = "Middleware"; // Better: mw.name() if added to trait
+                tracing::error!("Middleware failure in before_ai_call: {}", e);
+                return Err(e.context(format!("Middleware failure in before_ai_call")));
+            }
         }
 
         // 2. Execute AI reasoning
@@ -38,21 +43,58 @@ impl Harness {
 
         // 3. Hook: after_ai_call (Response Parsing/Intent Extraction)
         for mw in &self.middlewares {
-            mw.after_ai_call(&mut res).await?;
+            if let Err(e) = mw.after_ai_call(&mut res).await {
+                tracing::error!("Middleware failure in after_ai_call: {}", e);
+                return Err(e.context(format!("Middleware failure in after_ai_call")));
+            }
         }
 
         Ok(res)
     }
 
-    /// Orchestrated Streaming Loop.
+    /// Orchestrated Streaming Loop with Post-Hook Support.
     pub async fn run_stream(&self, mut req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
-        // 1. Hook: before_ai_call (Context Optimization/Planning)
+        // 1. Hook: before_ai_call
         for mw in &self.middlewares {
-            mw.before_ai_call(&mut req).await?;
+            if let Err(e) = mw.before_ai_call(&mut req).await {
+                tracing::error!("Middleware failure in before_ai_call: {}", e);
+                return Err(e.context("Middleware failure in before_ai_call"));
+            }
         }
 
         // 2. Execute AI reasoning (Streaming)
-        self.provider.stream_complete(req).await
+        let inner_stream = self.provider.stream_complete(req).await?;
+        let middlewares = self.middlewares.clone();
+
+        // Wrap stream to apply post-hooks after completion
+        let wrapped = async_stream::try_stream! {
+            let mut full_response = Response { 
+                content: String::new(), 
+                tool_calls: Vec::new() 
+            };
+            
+            futures_util::pin_mut!(inner_stream);
+            while let Some(chunk_res) = inner_stream.next().await {
+                let chunk = chunk_res?;
+                
+                // Accumulate content and tool calls for post-processing
+                if let Some(ref content) = chunk.content_delta {
+                    full_response.content.push_str(content);
+                }
+                
+                yield chunk;
+            }
+
+            // 3. Hook: after_ai_call (Response Processing)
+            for mw in &middlewares {
+                if let Err(e) = mw.after_ai_call(&mut full_response).await {
+                    tracing::error!("Middleware failure in after_ai_call (streaming): {}", e);
+                    // We don't bail the stream here as it's already finished, but we log
+                }
+            }
+        };
+
+        Ok(Box::pin(wrapped))
     }
 
     /// Helper for executed tool hooks (before).

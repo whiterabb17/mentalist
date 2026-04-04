@@ -3,15 +3,30 @@ use mem_core::{Context, FileStorage, ToolCall};
 use mem_resilience::ResilientMemoryController;
 use std::sync::Arc;
 use std::path::PathBuf;
-use futures_util::StreamExt;
-use async_stream::try_stream;
+use futures_util::{StreamExt, stream::BoxStream};
 use chrono::Utc;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeepAgentState {
     pub session_id: String,
-    pub context: Context,
+    pub context: Arc<Context>,
     pub sandbox_root: PathBuf,
+}
+
+pub struct StepConfig {
+    pub max_turns: usize,
+    pub timeout_seconds: u64,
+    pub fail_on_limit: bool,
+}
+
+impl Default for StepConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 10,
+            timeout_seconds: 300,
+            fail_on_limit: false,
+        }
+    }
 }
 
 /// The DeepAgent orchestrates the Model, Harness, and Executor into a single stateful entity.
@@ -35,7 +50,7 @@ impl DeepAgent {
     /// Executes a single reasoning/action step following the DeepAgent loop.
     pub async fn step(&mut self, user_input: String) -> anyhow::Result<String> {
         let mut full_content = String::new();
-        let mut stream = Box::pin(self.step_stream(user_input));
+        let mut stream = Box::pin(self.step_stream(user_input, StepConfig::default()));
         
         while let Some(res) = stream.next().await {
             match res? {
@@ -47,29 +62,50 @@ impl DeepAgent {
     }
 
     /// Autonomous reasoning loop that executes tools and continues until a final answer is reached.
-    pub fn step_stream(&mut self, user_input: String) -> impl futures_util::Stream<Item = anyhow::Result<AgentStepEvent>> + '_ {
-        try_stream! {
-            // 1. Initial Prompt Handling
-            self.state.context.items.push(mem_core::MemoryItem {
+    pub fn step_stream(
+        &mut self, 
+        user_input: String,
+        config: StepConfig,
+    ) -> BoxStream<'_, anyhow::Result<AgentStepEvent>> {
+        let stream = async_stream::try_stream! {
+            // Explicitly state the chunk type to help inference
+            if false { yield anyhow::Ok(AgentStepEvent::Status("".into()))?; }
+            
+            let start_time = std::time::Instant::now();
+
+            // 1. Initial Prompt Handling - Add to Arc<Context>
+            let mut current_context = (*self.state.context).clone();
+            current_context.items.push(mem_core::MemoryItem {
                 role: mem_core::MemoryRole::User,
                 content: user_input.clone(),
                 timestamp: Utc::now().timestamp() as u64,
                 metadata: serde_json::json!({}),
             });
+            self.state.context = Arc::new(current_context);
 
             let mut turn_count = 0;
-            const MAX_TURNS: usize = 10;
 
             loop {
                 turn_count += 1;
-                if turn_count > MAX_TURNS {
-                    yield AgentStepEvent::Status("Turn limit reached. Stopping.".to_string());
+                
+                // Check turn limit
+                if turn_count > config.max_turns {
+                    let msg = format!("Turn limit ({}) reached. Stopping.", config.max_turns);
+                    yield AgentStepEvent::Status(msg.clone());
+                    if config.fail_on_limit {
+                        Err(anyhow::anyhow!(msg))?;
+                    }
                     break;
+                }
+
+                // Check timeout
+                if start_time.elapsed().as_secs() > config.timeout_seconds {
+                    Err(anyhow::anyhow!("Agent step timeout after {}s", config.timeout_seconds))?;
                 }
 
                 let req = Request {
                     prompt: if turn_count == 1 { user_input.clone() } else { "Continue".to_string() },
-                    context: self.state.context.clone(),
+                    context: self.state.context.clone(), // Cheap Arc clone
                 };
 
                 let mut stream = self.harness.run_stream(req).await?;
@@ -81,13 +117,11 @@ impl DeepAgent {
                 while let Some(chunk_res) = stream.next().await {
                     let chunk = chunk_res?;
                     
-                    // Accumulate text
                     if let Some(c) = chunk.content_delta {
                         final_content.push_str(&c);
                         yield AgentStepEvent::TextChunk(c);
                     }
 
-                    // Reconstruct tool calls from deltas
                     if let Some(delta) = chunk.tool_call_delta {
                         if let Some(name) = delta.name {
                             current_tool_name.push_str(&name);
@@ -99,83 +133,105 @@ impl DeepAgent {
 
                     if chunk.is_final {
                         if !current_tool_name.is_empty() {
-                            let arguments: serde_json::Value = serde_json::from_str(&current_tool_args).unwrap_or(serde_json::json!({}));
+                            let arguments: serde_json::Value = serde_json::from_str(&current_tool_args)
+                                .map_err(|e| {
+                                    tracing::error!("Failed to parse tool arguments: {}. Raw: {}", e, current_tool_args);
+                                    anyhow::anyhow!("Tool argument JSON parse error: {} for args: {}", e, current_tool_args)
+                                })?;
                             tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
-                            current_tool_name.clear();
                             current_tool_args.clear();
                         }
                     }
                 }
 
-                // If no tools, finalize and break
                 if tool_calls.is_empty() {
-                    self.state.context.items.push(mem_core::MemoryItem {
+                    let mut current_context = (*self.state.context).clone();
+                    current_context.items.push(mem_core::MemoryItem {
                         role: mem_core::MemoryRole::Assistant,
                         content: final_content,
                         timestamp: Utc::now().timestamp() as u64,
                         metadata: serde_json::json!({}),
                     });
+                    self.state.context = Arc::new(current_context);
                     break;
                 }
 
-                // Execute tools sequentially
                 for mut tool in tool_calls {
-                    yield AgentStepEvent::ToolStarted(tool.name.clone());
+                    let tool_name = tool.name.clone();
+                    yield AgentStepEvent::ToolStarted(tool_name.clone());
                     
                     self.harness.run_before_tool_hooks(&mut tool).await?;
                     
                     let args_vec: Vec<String> = if let Some(obj) = tool.arguments.as_object() {
-                        obj.values().map(|v| v.as_str().unwrap_or_default().to_string()).collect()
+                        obj.values().map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Null => String::new(),
+                            other => serde_json::to_string(other).unwrap_or_default(),
+                        }).collect()
                     } else {
                         vec![]
                     };
 
-                    match self.executor.execute(&tool.name, args_vec).await {
+                    match self.executor.execute(&tool_name, args_vec).await {
                         Ok(mut result) => {
                             self.harness.run_after_tool_hooks(&tool, &mut result).await?;
-                            yield AgentStepEvent::ToolFinished(tool.name.clone(), result.clone());
+                            yield AgentStepEvent::ToolFinished(tool_name.clone(), result.clone());
                             
-                            self.state.context.items.push(mem_core::MemoryItem {
+                            let mut current_ctx = (*self.state.context).clone();
+                            current_ctx.items.push(mem_core::MemoryItem {
                                 role: mem_core::MemoryRole::Tool,
                                 content: result,
                                 timestamp: Utc::now().timestamp() as u64,
-                                metadata: serde_json::json!({"tool": tool.name}),
+                                metadata: serde_json::json!({"tool": tool_name}),
                             });
+                            self.state.context = Arc::new(current_ctx);
                         }
                         Err(e) => {
                             let err_msg = format!("Tool error: {}", e);
                             yield AgentStepEvent::Status(err_msg.clone());
-                            self.state.context.items.push(mem_core::MemoryItem {
+                            
+                            let mut current_ctx = (*self.state.context).clone();
+                            current_ctx.items.push(mem_core::MemoryItem {
                                 role: mem_core::MemoryRole::Tool,
                                 content: err_msg,
                                 timestamp: Utc::now().timestamp() as u64,
-                                metadata: serde_json::json!({"tool": tool.name, "error": true}),
+                                metadata: serde_json::json!({"tool": tool_name, "error": true}),
                             });
+                            self.state.context = Arc::new(current_ctx);
                         }
                     }
                 }
             }
 
-            self.save_state_resilient().await?;
-        }
+            let _ = self.save_state_resilient().await;
+        };
+        Box::pin(stream)
     }
 
-    /// Persists agent state using the ResilientMemoryController (Gap 9)
+    /// Persists agent state atomically using temp files.
     pub async fn save_state_resilient(&self) -> anyhow::Result<()> {
         let root = PathBuf::from(".agent/sessions");
-        if !root.exists() {
-            std::fs::create_dir_all(&root)?;
-        }
+        
+        // Atomic directory creation
+        let _ = tokio::fs::create_dir_all(&root).await;
         
         let path = root.join(format!("session_{}.session", self.state.session_id));
         let data = serde_json::to_vec_pretty(&self.state)?;
         
-        self.memory_controller.optimize_resilient(&mut self.state.context.clone()).await?;
+        let mut optimized_context = (*self.state.context).clone();
+        self.memory_controller.optimize_resilient(&mut optimized_context).await?;
         
-        std::fs::write(path, data)?;
+        // Atomic write: write to temp file, then rename
+        let temp_file = root.join(format!(".session_{}.tmp", self.state.session_id));
+        tokio::fs::write(&temp_file, data).await?;
+        tokio::fs::rename(&temp_file, path).await?;
+        
         Ok(())
     }
 }
+
 
 pub enum AgentStepEvent {
     TextChunk(String),

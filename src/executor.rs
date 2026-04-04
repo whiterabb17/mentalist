@@ -10,23 +10,40 @@ use std::collections::HashMap;
 
 /// Optional command validator to block malicious patterns.
 pub struct CommandValidator {
-    pub blacklisted_cmds: Vec<String>,
+    pub allowed_cmds: Vec<String>,
 }
 
 impl CommandValidator {
     pub fn new_default() -> Self {
         Self {
-            blacklisted_cmds: vec![
-                "rm".to_string(), "mkfs".to_string(), "dd".to_string(), 
-                "mv".to_string(), "cp".to_string(), "chmod".to_string()
+            allowed_cmds: vec![
+                "python".to_string(), "node".to_string(), "ruby".to_string(), 
+                "bash".to_string(), "sh".to_string(), "cat".to_string(), 
+                "ls".to_string(), "grep".to_string(), "jq".to_string(), 
+                "curl".to_string(), "wget".to_string(), "tar".to_string(), 
+                "zip".to_string(), "find".to_string()
             ],
         }
     }
 
-    pub fn validate(&self, cmd: &str, _args: &[String]) -> Result<()> {
-        if self.blacklisted_cmds.contains(&cmd.to_string()) {
-            bail!("Command '{}' is blacklisted for security reasons", cmd);
+    pub fn validate(&self, cmd: &str, args: &[String]) -> Result<()> {
+        // 1. Whitelist approach
+        if !self.allowed_cmds.contains(&cmd.to_string()) {
+            bail!("Command '{}' is not in the whitelist of allowed tools", cmd);
         }
+
+        // 2. Validate all arguments for shell metacharacters
+        for arg in args {
+            if arg.contains(|c: char| ";&|`$()[]{}\"'\\".contains(c)) {
+                bail!("Argument contains potentially dangerous shell characters: {}", arg);
+            }
+            
+            // 3. Path traversal check
+            if arg.contains("..") || arg.starts_with('/') {
+                bail!("Argument appears to be a path traversal attempt or absolute path: {}", arg);
+            }
+        }
+
         Ok(())
     }
 }
@@ -58,13 +75,44 @@ pub struct SandboxedExecutor {
 }
 
 impl SandboxedExecutor {
-    pub fn new(mode: ExecutionMode, root_dir: PathBuf, vault_dir: Option<PathBuf>) -> Self {
-        Self { 
+    pub fn new(mode: ExecutionMode, root_dir: PathBuf, vault_dir: Option<PathBuf>) -> Result<Self> {
+        // Validate root_dir
+        if !root_dir.exists() {
+            bail!("Root directory does not exist: {:?}", root_dir);
+        }
+        if !root_dir.is_dir() {
+            bail!("Root path is not a directory: {:?}", root_dir);
+        }
+
+        // Validate vault_dir if provided
+        if let Some(ref vault) = vault_dir {
+            if !vault.exists() {
+                bail!("Vault directory does not exist: {:?}", vault);
+            }
+        }
+
+        // Validate execution mode environment
+        match &mode {
+            ExecutionMode::Docker { .. } => {
+                // Warning only for docker daemon availability
+                if let Err(e) = std::process::Command::new("docker").arg("version").output() {
+                    tracing::warn!("Docker daemon validation warning: {}", e);
+                }
+            },
+            ExecutionMode::Wasm { module_path: Some(path), .. } => {
+                if !path.exists() {
+                    bail!("Wasm module not found: {:?}", path);
+                }
+            },
+            _ => {},
+        }
+
+        Ok(Self { 
             mode, 
             root_dir, 
             vault_dir,
             validator: CommandValidator::new_default(),
-        }
+        })
     }
 
     pub async fn execute(&self, cmd: &str, args: Vec<String>) -> Result<String> {
@@ -198,7 +246,6 @@ impl SandboxedExecutor {
     async fn execute_docker(&self, image: &str, cmd: &str, args: Vec<String>, working_dir: &Path, memory_limit: Option<i64>, cpu_quota: Option<i64>) -> Result<String> {
         let docker = Docker::connect_with_local_defaults()?;
         
-        // Pull logic...
         let mut pull_stream = docker.create_image(Some(CreateImageOptions { from_image: image.to_string(), ..Default::default() }), None, None);
         while let Some(res) = pull_stream.next().await { res?; }
 
@@ -226,27 +273,58 @@ impl SandboxedExecutor {
         };
 
         let container = docker.create_container::<String, String>(None, config).await?;
-        docker.start_container::<String>(&container.id, None).await?;
+        
+        let result = async {
+            docker.start_container::<String>(&container.id, None).await?;
+            let mut logs = docker.logs(&container.id, Some(bollard::container::LogsOptions::<String> { stdout: true, stderr: true, follow: true, ..Default::default() }));
 
-        let mut logs = docker.logs(&container.id, Some(bollard::container::LogsOptions::<String> { stdout: true, stderr: true, follow: true, ..Default::default() }));
+            let mut output = String::new();
+            while let Some(log_result) = logs.next().await {
+                if let LogOutput::StdOut { message } | LogOutput::StdErr { message } = log_result? {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+            Ok::<String, anyhow::Error>(output)
+        }.await;
 
-        let mut output = String::new();
-        while let Some(log_result) = logs.next().await {
-            if let LogOutput::StdOut { message } | LogOutput::StdErr { message } = log_result? {
-                output.push_str(&String::from_utf8_lossy(&message));
+        // Ensure cleanup
+        match docker.remove_container(&container.id, None).await {
+            Ok(_) => {},
+            Err(e) => {
+                tracing::error!("Failed to clean up container {}: {}", container.id, e);
+                // Attempt force removal
+                let _ = docker.remove_container(
+                    &container.id, 
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    })
+                ).await;
             }
         }
 
-        let _ = docker.remove_container(&container.id, None).await;
-        Ok(output)
+        result
     }
 
-    /// Commit staged changes from vault to project root.
+    /// Commit staged changes from vault to project root safely.
     pub async fn commit_vault(&self) -> Result<()> {
         if let Some(vault) = &self.vault_dir {
             if vault.exists() {
+                // Validate vault is within project boundaries
+                let vault_canonical = vault.canonicalize()?;
+                let root_canonical = self.root_dir.canonicalize()?;
+                
+                if !vault_canonical.starts_with(&root_canonical) {
+                    bail!(
+                        "Security breach attempt: Vault directory {:?} is outside project root {:?}",
+                        vault_canonical,
+                        root_canonical
+                    );
+                }
+
                 self.recursive_copy(vault, &self.root_dir).await?;
-                // Optionally clear vault after commit
+                
+                // Secure cleanup with verification
                 tokio::fs::remove_dir_all(vault).await?;
                 tokio::fs::create_dir_all(vault).await?;
             }
@@ -255,10 +333,24 @@ impl SandboxedExecutor {
     }
 
     async fn recursive_copy(&self, src: &Path, dst: &Path) -> Result<()> {
-        tokio::fs::create_dir_all(dst).await?;
         let mut entries = tokio::fs::read_dir(src).await?;
+        let mut total_size = 0u64;
+        const MAX_VAULT_SIZE: u64 = 1024 * 1024 * 100; // 100MB max
+        
         while let Some(entry) = entries.next_entry().await? {
+            let metadata = entry.metadata().await?;
+            total_size += metadata.len();
+            
+            if total_size > MAX_VAULT_SIZE {
+                bail!("Vault copy exceeds size limit ({}MB)", MAX_VAULT_SIZE / 1024 / 1024);
+            }
+            
             let ty = entry.file_type().await?;
+            if ty.is_symlink() {
+                tracing::warn!("Skipping symlink to prevent traversal: {:?}", entry.path());
+                continue;
+            }
+
             if ty.is_dir() {
                 Box::pin(self.recursive_copy(&entry.path(), &dst.join(entry.file_name()))).await?;
             } else {

@@ -1,4 +1,4 @@
-# Mentalist (v1.0.0)
+# Mentalist (v0.2.7)
 
 The **Mentalist** is a high-performance, production-ready execution environment for autonomous agents in Rust. It implements the **Agent = Model + Harness** paradigm, providing the infrastructure to make LLM-based agents reliable, stateful, and context-aware through the integrated **MindPalace** memory ecosystem.
 

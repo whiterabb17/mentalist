@@ -34,7 +34,7 @@ async fn test_harness_lifecycle_basic() {
     
     let req = Request {
         prompt: "Hi".to_string(),
-        context: Context { items: vec![] },
+        context: Arc::new(Context { items: vec![] }),
     };
     
     let res = harness.run(req).await.unwrap();
@@ -61,11 +61,11 @@ async fn test_harness_middleware_execution() {
     let called = Arc::new(tokio::sync::Mutex::new(false));
     let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
     let mut harness = Harness::new(provider);
-    harness.add_middleware(Box::new(SpyMiddleware { called: called.clone() }));
+    harness.add_middleware(Arc::new(SpyMiddleware { called: called.clone() }));
     
     let req = Request {
         prompt: "test".to_string(),
-        context: Context { items: vec![] },
+        context: Arc::new(Context { items: vec![] }),
     };
     
     let _ = harness.run(req).await.unwrap();
@@ -100,7 +100,7 @@ async fn test_harness_tool_hooks() {
     let ac = Arc::new(tokio::sync::Mutex::new(false));
     let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
     let mut harness = Harness::new(provider);
-    harness.add_middleware(Box::new(ToolSpy { 
+    harness.add_middleware(Arc::new(ToolSpy { 
         before_called: bc.clone(), 
         after_called: ac.clone() 
     }));
