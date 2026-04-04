@@ -22,6 +22,12 @@ Includes a `SandboxedExecutor` for high-security tool execution:
 - **Wasmtime (Natively Secure)**: Capability-based security for running tools like Python via Wasm.
 - **Docker (Native `bollard`)**: Full container isolation with auto-pull support.
 
+### 5. Multi-Protocol Tool Support
+Exposes a flexible executor architecture:
+- **MCP (Model Context Protocol)**: Direct integration with domestic and remote MCP servers via the `McpExecutor`. Supports standard-compliant `initialize` handshakes and JSON-RPC.
+- **Skills System**: A filesystem-based tool discovery system. Agents can "learn" new capabilities by simply dropping `.py` or `.js` scripts into a designated skills directory.
+- **Built-in Helpers**: Native support for **Filesystem** and **Firecrawl** (Web-Search) MCP servers via `BuiltinMcp`.
+
 ## 🛠️ Usage Example (v1.0.0)
 
 Integrated with the hardened MindPalace memory architecture:

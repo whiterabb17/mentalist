@@ -9,6 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
@@ -36,7 +38,9 @@ struct JsonRpcError {
 pub struct McpExecutor {
     pub command: String,
     pub args: Vec<String>,
+    pub env: HashMap<String, String>,
     process: Arc<Mutex<Option<Child>>>,
+    id_counter: AtomicI64,
 }
 
 impl McpExecutor {
@@ -44,31 +48,70 @@ impl McpExecutor {
         Self {
             command,
             args,
+            env: HashMap::new(),
             process: Arc::new(Mutex::new(None)),
+            id_counter: AtomicI64::new(1),
         }
+    }
+
+    pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
+        self.env = env;
+        self
     }
 
     async fn ensure_process(&self) -> Result<()> {
         let mut child_guard = self.process.lock().await;
         if child_guard.is_none() {
             tracing::info!("Starting MCP server: {} {:?}", self.command, self.args);
-            let child = Command::new(&self.command)
-                .args(&self.args)
+            
+            let mut cmd = Command::new(&self.command);
+            cmd.args(&self.args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
-                .spawn()
+                .envs(&self.env);
+            
+            let child = cmd.spawn()
                 .context(format!("Failed to start MCP server: {}", self.command))?;
+            
             *child_guard = Some(child);
+            
+            // Drop guard to allow call_rpc to lock it
+            drop(child_guard);
+            
+            // Perform initialization handshake
+            self.initialize().await?;
         }
+        Ok(())
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        let params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "Mentalist",
+                "version": "0.3.0"
+            }
+        });
+        
+        // We use a "raw" call here if we wanted to avoid the recursion,
+        // but we can also just use the fact that we've already initialized to break the loop.
+        // For simplicity with the current structure, we'll implement a 'raw_call' that assumes process exists.
+        self.raw_call("initialize", params).await?;
         Ok(())
     }
 
     async fn call_rpc(&self, method: &str, params: Value) -> Result<Value> {
         self.ensure_process().await?;
+        self.raw_call(method, params).await
+    }
+
+    async fn raw_call(&self, method: &str, params: Value) -> Result<Value> {
+        let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
         
         let mut child_guard = self.process.lock().await;
-        let child = child_guard.as_mut().unwrap();
+        let child = child_guard.as_mut().context("MCP Process not started")?;
         
         let stdin = child.stdin.as_mut().context("Failed to open stdin")?;
         let stdout = child.stdout.as_mut().context("Failed to open stdout")?;
@@ -78,7 +121,7 @@ impl McpExecutor {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
             params,
-            id: 1, // Simple sequential ID could be improved
+            id,
         };
 
         let req_text = serde_json::to_string(&request)? + "\n";
@@ -89,9 +132,8 @@ impl McpExecutor {
         reader.read_line(&mut line).await?;
         
         if line.is_empty() {
-            // Process might have died
             *child_guard = None;
-            return Err(anyhow!("MCP server closed connection"));
+            return Err(anyhow!("MCP server closed connection unexpectedly"));
         }
 
         let response: JsonRpcResponse = serde_json::from_str(&line)
@@ -108,7 +150,6 @@ impl McpExecutor {
 #[async_trait]
 impl ToolExecutor for McpExecutor {
     async fn execute(&self, name: &str, args: Value) -> Result<String> {
-        // MCP tools/call expects { name: "...", arguments: { ... } }
         let params = serde_json::json!({
             "name": name,
             "arguments": args
@@ -116,7 +157,6 @@ impl ToolExecutor for McpExecutor {
 
         let result = self.call_rpc("tools/call", params).await?;
         
-        // MCP response for tools/call usually contains a 'content' array
         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
             let mut full_text = String::new();
             for item in content {
@@ -150,5 +190,23 @@ impl ToolExecutor for McpExecutor {
         } else {
             Ok(vec![])
         }
+    }
+}
+
+/// Helper for launching common MCP servers using npx
+pub struct BuiltinMcp;
+
+impl BuiltinMcp {
+    pub fn filesystem(paths: Vec<String>) -> McpExecutor {
+        let mut args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
+        args.extend(paths);
+        McpExecutor::new("npx".to_string(), args)
+    }
+
+    pub fn firecrawl(api_key: String) -> McpExecutor {
+        let args = vec!["-y".to_string(), "firecrawl-mcp".to_string()];
+        let mut env = HashMap::new();
+        env.insert("FIRECRAWL_API_KEY".to_string(), api_key);
+        McpExecutor::new("npx".to_string(), args).with_env(env)
     }
 }
