@@ -3,11 +3,17 @@ use crate::{Request, Response, ToolCall};
 use async_trait::async_trait;
 use brain::Brain;
 use mem_bridge::AgentBridge;
-use mem_core::{Context, FileStorage, MemoryItem, MemoryRole};
+use mem_compactor::IntelligentFullCompactor;
+use mem_core::{Context, FileStorage, MemoryItem, MemoryRole, MindPalaceConfig};
+use mem_dreamer::DreamWorker;
 use mem_extractor::{FactExtractor, ReflectionLayer};
+use mem_micro::{AdaptiveMicroCompactor, TTLDecayStrategy};
 use mem_offloader::{OffloaderConfig, ToolOffloader};
+use mem_personality::PersonalityGuard;
 use mem_retriever::{MemoryRetriever, RuVectorStore};
+use mem_session::SessionSummarizer;
 use ruvector_core::types::DistanceMetric;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[async_trait]
@@ -82,6 +88,7 @@ pub struct MindPalaceMiddleware {
     pub extractor: Arc<FactExtractor<FileStorage>>,
     pub retriever: MemoryRetriever<FileStorage>,
     pub bridge: Arc<AgentBridge<FileStorage>>,
+    pub dreamer: Option<Arc<DreamWorker<FileStorage>>>,
     pub session_id: String,
     pub token_budget: usize,
 }
@@ -92,6 +99,7 @@ impl MindPalaceMiddleware {
         extractor: Arc<FactExtractor<FileStorage>>,
         retriever: MemoryRetriever<FileStorage>,
         bridge: Arc<AgentBridge<FileStorage>>,
+        dreamer: Option<Arc<DreamWorker<FileStorage>>>,
         session_id: String,
     ) -> Self {
         Self {
@@ -99,12 +107,12 @@ impl MindPalaceMiddleware {
             extractor,
             retriever,
             bridge,
+            dreamer,
             session_id,
             token_budget: 4096,
         }
     }
 
-    /// Factory method to create a fully-hardened 7-layer production middleware
     pub fn hardened(
         storage: FileStorage,
         llm: Arc<dyn mem_core::LlmClient>,
@@ -112,9 +120,22 @@ impl MindPalaceMiddleware {
         token_counter: Arc<dyn mem_core::TokenCounter>,
         session_id: String,
         dimension: usize,
+        vault_path: PathBuf,
     ) -> Self {
-        let config = mem_core::MindPalaceConfig::default();
+        let mut config = MindPalaceConfig::default();
+        config.max_context_items = 50; // Standard threshold for deep focus
+
         let mut brain = Brain::new(config.clone(), None, Some(token_counter));
+
+        // Create directories for the session vault
+        let checkpoint_dir = vault_path.join("checkpoints");
+        let narrative_dir = vault_path.join("narratives");
+        let knowledge_dir = vault_path.join("knowledge");
+        std::fs::create_dir_all(&checkpoint_dir).ok();
+        std::fs::create_dir_all(&narrative_dir).ok();
+        std::fs::create_dir_all(&knowledge_dir).ok();
+
+        // Initialize Shared Infrastructure (Extractor)
         let extractor = Arc::new(FactExtractor::new(
             llm.clone(),
             embeddings.clone(),
@@ -124,30 +145,82 @@ impl MindPalaceMiddleware {
             session_id.clone(),
         ));
 
-        // 1. Efficiency: Tool Offloader
+        // 1. Identity & Ethics: Personality Guard (Priority 1)
+        brain.add_layer(Arc::new(PersonalityGuard::new(
+            "Gypsy: A high-agency agentic AI focused on filesystem excellence and pair programming.".to_string(),
+            Some(llm.clone()),
+        )));
+
+        // 2. Efficiency: Tool Offloader (Priority 1)
         brain.add_layer(Arc::new(ToolOffloader::new(
             storage.clone(),
             OffloaderConfig::default(),
         )));
 
-        // 2. Intelligence: Reflection & Fact Extraction
-        brain.add_layer(Arc::new(ReflectionLayer::new(extractor.clone())));
-        brain.add_layer(extractor.clone());
+        // 3. Noise Reduction: Adaptive Micro Compactor (Priority 2)
+        let relevance_analyzer = Arc::clone(&extractor) as Arc<dyn mem_core::RelevanceAnalyzer>;
+        brain.add_layer(Arc::new(AdaptiveMicroCompactor::new(
+            config.clone(),
+            TTLDecayStrategy::AdaptiveByType,
+            relevance_analyzer,
+        )));
 
-        // 3. Coordination: Agent Bridge (Priority 7)
+        // 4. Summarization: Session Summarizer (Priority 3)
+        // Hardcoded 80% threshold as per user request
+        let mut session_config = config.clone();
+        session_config.summary_interval = (config.max_context_items as f32 * 0.8) as usize;
+        brain.add_layer(Arc::new(SessionSummarizer::new(
+            llm.clone(),
+            storage.clone(),
+            session_config,
+            narrative_dir.to_string_lossy().to_string(),
+            true, // Validation mode on
+        )));
+
+        // 5. Intelligence: Reflection & Fact Extraction (Priority 4/5)
+        brain.add_layer(Arc::new(ReflectionLayer::new(extractor.clone())));
+        brain.add_layer(extractor.clone() as Arc<dyn mem_core::MemoryLayer>);
+
+        // 6. Emergency Pruning: Intelligent Full Compactor (Priority 4)
+        let importance_analyzer = Arc::clone(&extractor) as Arc<dyn mem_core::ImportanceAnalyzer>;
+        brain.add_layer(Arc::new(IntelligentFullCompactor::new(
+            llm.clone(),
+            importance_analyzer,
+            storage.clone(),
+            config.clone(),
+            checkpoint_dir.to_string_lossy().to_string(),
+        )));
+
+        // 7. Background Synthesis: Dream Worker (Priority 6)
+        let dreamer = Arc::new(DreamWorker::new(
+            llm.clone(),
+            storage.clone(),
+            config.clone(),
+            vault_path.join("dream.lock"),
+        ));
+        brain.add_layer(dreamer.clone());
+
+        // 8. Coordination: Agent Bridge (Priority 7)
         let bridge = Arc::new(AgentBridge::new(storage.clone()));
         brain.add_layer(bridge.clone());
 
-        // 4. Persistence: RuVector Index (SOTA Performance)
+        // Persistence Layer (Memory Retriever)
         let graph = Arc::new(mem_core::FactGraph::new(None).expect("Failed to init fact graph"));
         let store = Arc::new(RuVectorStore::new(
             dimension,
             DistanceMetric::Cosine,
             graph.clone(),
         ));
-        let retriever = MemoryRetriever::new(storage, embeddings, llm, store, graph);
+        let retriever = MemoryRetriever::new(storage, embeddings, llm.clone(), store, graph);
 
-        Self::new(Arc::new(brain), extractor, retriever, bridge, session_id)
+        Self::new(
+            Arc::new(brain),
+            extractor,
+            retriever,
+            bridge,
+            Some(dreamer),
+            session_id,
+        )
     }
 }
 

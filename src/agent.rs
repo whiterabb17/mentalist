@@ -1,6 +1,7 @@
 use crate::{Harness, Request, executor::ToolExecutor};
 use mem_core::{Context, FileStorage, ToolCall};
 use mem_resilience::ResilientMemoryController;
+use mem_dreamer::DreamScheduler;
 use std::sync::Arc;
 use std::path::PathBuf;
 use futures_util::{StreamExt, stream::BoxStream};
@@ -73,6 +74,7 @@ pub struct DeepAgent {
     pub state: DeepAgentState,
     pub executor: Arc<dyn ToolExecutor>,
     pub memory_controller: Arc<ResilientMemoryController<FileStorage>>,
+    pub scheduler: Option<DreamScheduler<FileStorage>>,
 }
 
 impl DeepAgent {
@@ -80,13 +82,18 @@ impl DeepAgent {
         harness: Harness, 
         state: DeepAgentState, 
         executor: Arc<dyn ToolExecutor>, 
-        memory_controller: Arc<ResilientMemoryController<FileStorage>>
+        memory_controller: Arc<ResilientMemoryController<FileStorage>>,
+        scheduler: Option<DreamScheduler<FileStorage>>
     ) -> Self {
-        Self { harness, state, executor, memory_controller }
+        Self { harness, state, executor, memory_controller, scheduler }
     }
 
     /// Executes a single reasoning/action step following the DeepAgent loop.
     pub async fn step(&mut self, user_input: String) -> anyhow::Result<String> {
+        if let Some(s) = &self.scheduler {
+            s.record_activity();
+        }
+        
         let mut full_content = String::new();
         let mut stream = Box::pin(self.step_stream(user_input, StepConfig::default()));
         
