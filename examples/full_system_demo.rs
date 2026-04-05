@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     ));
 
     // 3. Harness & Middlewares
-    let mut harness = Harness::new(Box::new(MockProvider));
+    let mut harness = Harness::new(Arc::new(MockProvider));
     harness.add_middleware(Arc::new(mp_middleware));
     harness.add_middleware(Arc::new(TodoMiddleware::new(std::env::current_dir()?.join(".agent/todo.md"))));
     

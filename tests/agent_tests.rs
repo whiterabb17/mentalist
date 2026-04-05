@@ -75,7 +75,7 @@ impl ToolExecutor for MockErrorExecutor {
 
 #[tokio::test]
 async fn test_agent_error_categorization_timeout() {
-    let provider = Box::new(MockToolModel { tool_name: "test_tool".into() });
+    let provider = Arc::new(MockToolModel { tool_name: "test_tool".into() });
     let harness = Harness::new(provider);
     let executor = Arc::new(MockErrorExecutor { error_msg: "Request timeout".into() });
     
@@ -102,7 +102,7 @@ async fn test_agent_error_categorization_timeout() {
 
 #[tokio::test]
 async fn test_agent_error_categorization_not_found() {
-    let provider = Box::new(MockToolModel { tool_name: "bad_tool".into() });
+    let provider = Arc::new(MockToolModel { tool_name: "bad_tool".into() });
     let harness = Harness::new(provider);
     let executor = Arc::new(MockErrorExecutor { error_msg: "Tool not found in path".into() });
     
@@ -129,7 +129,7 @@ async fn test_agent_error_categorization_not_found() {
 
 #[tokio::test]
 async fn test_timeout_protection() {
-    let provider = Box::new(MockToolModel { tool_name: "test_tool".into() });
+    let provider = Arc::new(MockToolModel { tool_name: "test_tool".into() });
     let harness = Harness::new(provider);
     let executor = Arc::new(MockErrorExecutor { error_msg: "Connection timeout while calling tool".into() });
     
@@ -184,7 +184,7 @@ impl mentalist::middleware::Middleware for ErrorMiddleware {
 
 #[tokio::test]
 async fn test_middleware_error_propagation() {
-    let provider = Box::new(MockToolModel { tool_name: "test_tool".into() });
+    let provider = Arc::new(MockToolModel { tool_name: "test_tool".into() });
     let mut harness = Harness::new(provider);
     harness.add_middleware(Arc::new(ErrorMiddleware));
     

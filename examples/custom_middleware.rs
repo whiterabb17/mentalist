@@ -60,7 +60,7 @@ impl Middleware for MetricsMiddleware {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let provider = Box::new(MockModel);
+    let provider = Arc::new(MockModel);
     let mut harness = Harness::new(provider);
     
     harness.add_middleware(Arc::new(SafetyMiddleware));

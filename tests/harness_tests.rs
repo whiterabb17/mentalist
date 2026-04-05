@@ -29,7 +29,7 @@ impl ModelProvider for MockModelProvider {
 
 #[tokio::test]
 async fn test_harness_lifecycle_basic() {
-    let provider = Box::new(MockModelProvider { response: "Hello Gypsy".to_string() });
+    let provider = Arc::new(MockModelProvider { response: "Hello Gypsy".to_string() });
     let harness = Harness::new(provider);
     
     let req = Request {
@@ -60,7 +60,7 @@ async fn test_harness_middleware_execution() {
     }
     
     let called = Arc::new(tokio::sync::Mutex::new(false));
-    let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
+    let provider = Arc::new(MockModelProvider { response: "Ok".to_string() });
     let mut harness = Harness::new(provider);
     harness.add_middleware(Arc::new(SpyMiddleware { called: called.clone() }));
     
@@ -100,7 +100,7 @@ async fn test_harness_tool_hooks() {
     
     let bc = Arc::new(tokio::sync::Mutex::new(false));
     let ac = Arc::new(tokio::sync::Mutex::new(false));
-    let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
+    let provider = Arc::new(MockModelProvider { response: "Ok".to_string() });
     let mut harness = Harness::new(provider);
     harness.add_middleware(Arc::new(ToolSpy { 
         before_called: bc.clone(), 
@@ -133,7 +133,7 @@ async fn test_harness_middleware_naming() {
         }
     }
     
-    let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
+    let provider = Arc::new(MockModelProvider { response: "Ok".to_string() });
     let mut harness = Harness::new(provider);
     harness.add_middleware(Arc::new(NamedMiddleware));
     
@@ -155,7 +155,7 @@ async fn test_logging_middleware_invocation() {
     // This mostly verifies it doesn't crash, as tracing is hard to capture in unit tests without specialized subscribers
     use mentalist::middleware::LoggingMiddleware;
     
-    let provider = Box::new(MockModelProvider { response: "Ok".to_string() });
+    let provider = Arc::new(MockModelProvider { response: "Ok".to_string() });
     let mut harness = Harness::new(provider);
     harness.add_middleware(Arc::new(LoggingMiddleware));
     

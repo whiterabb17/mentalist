@@ -45,7 +45,7 @@ fn bench_context_cloning(c: &mut Criterion) {
 
 fn bench_middleware_overhead(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let provider = Box::new(NoOpModel);
+    let provider = Arc::new(NoOpModel);
     let mut harness = Harness::new(provider);
     
     for _ in 0..10 {
