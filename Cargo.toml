@@ -36,7 +36,7 @@ reqwest-eventsource = "0.6"
 async-stream = "0.3"
 wasmtime = { version = "36.0.6", features = ["async"] }
 wasmtime-wasi = { version = "36.0.6", features = ["preview1"] }
-ruvector-core = "2.1"
+ruvector-core = "0.1.31"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

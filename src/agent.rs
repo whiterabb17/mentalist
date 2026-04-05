@@ -9,7 +9,7 @@ use chrono::Utc;
 /// Persistent state for a DeepAgent session.
 ///
 /// Contains the session ID, conversation context, and the sandbox root directory.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct DeepAgentState {
     pub session_id: String,
     /// Shared pointer to the conversation history/context.
