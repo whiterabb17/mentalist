@@ -92,7 +92,8 @@ async fn main() -> Result<()> {
         mock_embeddings.clone(),
         mock_tokens.clone(),
         session_id.clone(),
-        384
+        384,
+        storage_root.join("vault")
     );
 
     // 2. Resilience Setup
@@ -121,7 +122,7 @@ async fn main() -> Result<()> {
         Some(std::env::current_dir()?) // Local mode needs explicit vault
     ).expect("Failed to create executor"));
 
-    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller, None);
 
     println!("{}", ">>> Starting Hardened Verification Loop...".bold().white());
     

@@ -12,6 +12,13 @@ struct MockToolModel {
 }
 
 #[async_trait]
+impl mem_core::LlmClient for MockToolModel {
+    async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
+        Ok("Mocked Completion".to_string())
+    }
+}
+
+#[async_trait]
 impl ModelProvider for MockToolModel {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
         if req.context.items.iter().any(|i| i.role == MemoryRole::Tool) {
@@ -92,7 +99,7 @@ async fn test_agent_error_categorization_timeout() {
         sandbox_root: PathBuf::from("."),
     };
 
-    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller, None);
     let _ = agent.step("run".into()).await.unwrap();
     
     // Verify categorization
@@ -119,7 +126,7 @@ async fn test_agent_error_categorization_not_found() {
         sandbox_root: PathBuf::from("."),
     };
 
-    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller, None);
     let _ = agent.step("run".into()).await.unwrap();
     
     // Verify categorization
@@ -143,7 +150,7 @@ async fn test_timeout_protection() {
         sandbox_root: PathBuf::from("."),
     };
 
-    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller, None);
     let _ = agent.step("run".into()).await.unwrap();
     
     // Verify categorization
@@ -200,7 +207,7 @@ async fn test_middleware_error_propagation() {
         sandbox_root: PathBuf::from("."),
     };
 
-    let mut agent = DeepAgent::new(harness, state, executor, memory_controller);
+    let mut agent = DeepAgent::new(harness, state, executor, memory_controller, None);
     let result = agent.step("run".into()).await;
     
     assert!(result.is_err());

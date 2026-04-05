@@ -7,6 +7,20 @@ use futures_util::stream::{self, BoxStream};
 
 struct MockModel;
 #[async_trait]
+impl mem_core::LlmClient for MockModel {
+    async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
+        Ok("Custom Completion".into())
+    }
+}
+
+#[async_trait]
+impl mem_core::LlmClient for MockModel {
+    async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
+        Ok("Mock Completion".into())
+    }
+}
+
+#[async_trait]
 impl ModelProvider for MockModel {
     async fn complete(&self, _req: Request) -> anyhow::Result<Response> {
         Ok(Response { 

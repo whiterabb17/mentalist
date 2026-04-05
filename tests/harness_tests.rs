@@ -8,6 +8,13 @@ struct MockModelProvider {
 }
 
 #[async_trait]
+impl mem_core::LlmClient for MockModelProvider {
+    async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
+        Ok(self.response.clone())
+    }
+}
+
+#[async_trait]
 impl ModelProvider for MockModelProvider {
     async fn complete(&self, _req: Request) -> anyhow::Result<Response> {
         Ok(Response {
