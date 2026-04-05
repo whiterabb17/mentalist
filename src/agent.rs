@@ -111,14 +111,13 @@ impl DeepAgent {
             let start_time = std::time::Instant::now();
 
             // 1. Initial Prompt Handling - Add to Arc<Context>
-            let mut current_context = (*self.state.context).clone();
+            let current_context = Arc::make_mut(&mut self.state.context);
             current_context.items.push(mem_core::MemoryItem {
                 role: mem_core::MemoryRole::User,
                 content: user_input.clone(),
                 timestamp: Utc::now().timestamp() as u64,
                 metadata: serde_json::json!({}),
             });
-            self.state.context = Arc::new(current_context);
 
             let mut turn_count = 0;
 
@@ -181,14 +180,13 @@ impl DeepAgent {
                 }
 
                 if tool_calls.is_empty() {
-                    let mut current_context = (*self.state.context).clone();
+                    let current_context = Arc::make_mut(&mut self.state.context);
                     current_context.items.push(mem_core::MemoryItem {
                         role: mem_core::MemoryRole::Assistant,
                         content: final_content,
                         timestamp: Utc::now().timestamp() as u64,
                         metadata: serde_json::json!({}),
                     });
-                    self.state.context = Arc::new(current_context);
                     break;
                 }
 
@@ -206,7 +204,8 @@ impl DeepAgent {
                                 let err_msg = format!("Tool error: {}", e);
                                 
                                 // Categorize error for smarter retry logic
-                                let error_category = match e.to_string().to_lowercase() {
+                                let error_text = e.to_string().to_lowercase();
+                                let error_category = match error_text.as_str() {
                                     s if s.contains("timeout") => "transient_timeout",
                                     s if s.contains("not found") => "tool_not_found",
                                     s if s.contains("permission") || s.contains("denied") => "permission_denied",
@@ -232,19 +231,18 @@ impl DeepAgent {
                             self.harness.run_after_tool_hooks(&tool, &mut result).await?;
                             yield AgentStepEvent::ToolFinished(tool_name.clone(), result.clone());
                             
-                            let mut current_ctx = (*self.state.context).clone();
+                            let current_ctx = Arc::make_mut(&mut self.state.context);
                             current_ctx.items.push(mem_core::MemoryItem {
                                 role: mem_core::MemoryRole::Tool,
                                 content: result,
                                 timestamp: Utc::now().timestamp() as u64,
                                 metadata: serde_json::json!({"tool": tool_name}),
                             });
-                            self.state.context = Arc::new(current_ctx);
                         }
                         Err((err_msg, error_category)) => {
                             yield AgentStepEvent::Status(err_msg.clone());
                             
-                            let mut current_ctx = (*self.state.context).clone();
+                            let current_ctx = Arc::make_mut(&mut self.state.context);
                             current_ctx.items.push(mem_core::MemoryItem {
                                 role: mem_core::MemoryRole::Tool,
                                 content: err_msg,
@@ -255,7 +253,6 @@ impl DeepAgent {
                                     "error_category": error_category 
                                 }),
                             });
-                            self.state.context = Arc::new(current_ctx);
                         }
                     }
                 }

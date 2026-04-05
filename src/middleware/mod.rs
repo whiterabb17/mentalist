@@ -1,3 +1,4 @@
+use crate::executor::ToolExecutor;
 use crate::{Request, Response, ToolCall};
 use async_trait::async_trait;
 use brain::Brain;
@@ -8,15 +9,18 @@ use mem_offloader::{OffloaderConfig, ToolOffloader};
 use mem_retriever::{MemoryRetriever, RuVectorStore};
 use ruvector_core::types::DistanceMetric;
 use std::sync::Arc;
-use crate::executor::ToolExecutor;
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
     /// Returns a human-readable name for the middleware, used in diagnostic contexts.
-    fn name(&self) -> &str { "Middleware" }
+    fn name(&self) -> &str {
+        "Middleware"
+    }
 
     /// Returns the execution priority. Lower values run first. Default is 10.
-    fn priority(&self) -> i32 { 10 }
+    fn priority(&self) -> i32 {
+        10
+    }
 
     /// Fires before the prompt reaches the LLM.
     async fn before_ai_call(&self, _req: &mut Request) -> anyhow::Result<()> {
@@ -50,22 +54,28 @@ pub struct SafetyMiddleware {
 
 impl SafetyMiddleware {
     pub fn new(forbidden: Vec<String>) -> Self {
-        Self { forbidden_tools: forbidden }
+        Self {
+            forbidden_tools: forbidden,
+        }
     }
 }
 
 #[async_trait]
 impl Middleware for SafetyMiddleware {
-    fn name(&self) -> &str { "Safety" }
+    fn name(&self) -> &str {
+        "Safety"
+    }
 
     async fn before_tool_call(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
         if self.forbidden_tools.contains(&tool.name) {
-            anyhow::bail!("Security: Tool '{}' is forbidden by SafetyMiddleware.", tool.name);
+            anyhow::bail!(
+                "Security: Tool '{}' is forbidden by SafetyMiddleware.",
+                tool.name
+            );
         }
         Ok(())
     }
 }
-
 
 pub struct MindPalaceMiddleware {
     pub brain: Arc<Brain>,
@@ -113,24 +123,28 @@ impl MindPalaceMiddleware {
             "knowledge.json".to_string(),
             session_id.clone(),
         ));
- 
+
         // 1. Efficiency: Tool Offloader
         brain.add_layer(Arc::new(ToolOffloader::new(
             storage.clone(),
             OffloaderConfig::default(),
         )));
- 
+
         // 2. Intelligence: Reflection & Fact Extraction
         brain.add_layer(Arc::new(ReflectionLayer::new(extractor.clone())));
         brain.add_layer(extractor.clone());
- 
+
         // 3. Coordination: Agent Bridge (Priority 7)
         let bridge = Arc::new(AgentBridge::new(storage.clone()));
         brain.add_layer(bridge.clone());
- 
+
         // 4. Persistence: RuVector Index (SOTA Performance)
         let graph = Arc::new(mem_core::FactGraph::new(None).expect("Failed to init fact graph"));
-        let store = Arc::new(RuVectorStore::new(dimension, DistanceMetric::Cosine, graph.clone()));
+        let store = Arc::new(RuVectorStore::new(
+            dimension,
+            DistanceMetric::Cosine,
+            graph.clone(),
+        ));
         let retriever = MemoryRetriever::new(storage, embeddings, llm, store, graph);
 
         Self::new(Arc::new(brain), extractor, retriever, bridge, session_id)
@@ -139,7 +153,9 @@ impl MindPalaceMiddleware {
 
 #[async_trait]
 impl Middleware for MindPalaceMiddleware {
-    fn name(&self) -> &str { "MindPalace" }
+    fn name(&self) -> &str {
+        "MindPalace"
+    }
 
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         // 1. Proactive Extraction: Learn from User input immediately
@@ -154,7 +170,9 @@ impl Middleware for MindPalaceMiddleware {
         let user_facts = self.extractor.extract_facts(&user_context).await?;
         if !user_facts.is_empty() {
             self.extractor.commit_knowledge(user_facts).await?;
-            self.retriever.hydrate_from_kb(&self.extractor.knowledge_path).await?;
+            self.retriever
+                .hydrate_from_kb(&self.extractor.knowledge_path)
+                .await?;
         }
 
         // 2. High-Precision RAG: Use recent context + prompt for query
@@ -185,7 +203,7 @@ impl Middleware for MindPalaceMiddleware {
 
         // 3. Orchestrated 7-Layer Optimization (Hardened Logic)
         self.brain.optimize(&mut current_context).await?;
-        
+
         // Replace with optimized Arc
         req.context = Arc::new(current_context);
 
@@ -274,7 +292,9 @@ impl ToolDiscoveryMiddleware {
 
 #[async_trait]
 impl Middleware for ToolDiscoveryMiddleware {
-    fn name(&self) -> &str { "ToolDiscovery" }
+    fn name(&self) -> &str {
+        "ToolDiscovery"
+    }
 
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         let tools = self.executor.list_tools().await?;
@@ -288,12 +308,14 @@ pub struct LoggingMiddleware;
 
 #[async_trait]
 impl Middleware for LoggingMiddleware {
-    fn name(&self) -> &str { "Logging" }
+    fn name(&self) -> &str {
+        "Logging"
+    }
 
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         tracing::info!(
             target: "mentalist::logging_mw",
-            "AI Call Starting | Prompt: {:.50}... | Context Items: {}", 
+            "AI Call Starting | Prompt: {:.50}... | Context Items: {}",
             req.prompt, req.context.items.len()
         );
         Ok(())
@@ -302,17 +324,18 @@ impl Middleware for LoggingMiddleware {
     async fn after_ai_call(&self, res: &mut Response) -> anyhow::Result<()> {
         tracing::info!(
             target: "mentalist::logging_mw",
-            "AI Call Finished | Response: {:.50}... | Tool Calls: {}", 
+            "AI Call Finished | Response: {:.50}... | Tool Calls: {}",
             res.content, res.tool_calls.len()
         );
         Ok(())
     }
 
     async fn before_tool_call(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
-        let args_json = serde_json::to_string(&tool.arguments).unwrap_or_else(|_| "INVALID_ARGS".into());
+        let args_json =
+            serde_json::to_string(&tool.arguments).unwrap_or_else(|_| "INVALID_ARGS".into());
         tracing::info!(
             target: "mentalist::logging_mw",
-            "Tool Call Starting | Name: {} | Args: {}", 
+            "Tool Call Starting | Name: {} | Args: {}",
             tool.name, args_json
         );
         Ok(())
@@ -321,7 +344,7 @@ impl Middleware for LoggingMiddleware {
     async fn after_tool_call(&self, tool: &ToolCall, result: &mut String) -> anyhow::Result<()> {
         tracing::info!(
             target: "mentalist::logging_mw",
-            "Tool Call Finished | Name: {} | Result size: {} chars", 
+            "Tool Call Finished | Name: {} | Result size: {} chars",
             tool.name, result.len()
         );
         Ok(())
@@ -330,7 +353,7 @@ impl Middleware for LoggingMiddleware {
     async fn optimize_context(&self, ctx: &mut Context) -> anyhow::Result<()> {
         tracing::info!(
             target: "mentalist::logging_mw",
-            "Context Optimization Requested | Current Items: {}", 
+            "Context Optimization Requested | Current Items: {}",
             ctx.items.len()
         );
         Ok(())

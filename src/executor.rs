@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
-use bollard::container::{Config, LogOutput};
-use bollard::image::CreateImageOptions;
-use bollard::models::HostConfig;
+use bollard::container::LogOutput;
+use bollard::models::{ContainerCreateBody as Config, HostConfig};
+use bollard::query_parameters::{CreateImageOptions, LogsOptions, RemoveContainerOptions};
 use bollard::Docker;
 use futures_util::stream::StreamExt;
 use std::path::{Path, PathBuf};
@@ -249,7 +249,7 @@ impl SandboxedExecutor {
         env_vars: &HashMap<String, String>,
     ) -> Result<String> {
         use wasmtime::*;
-        use wasmtime_wasi::pipe::MemoryOutputPipe;
+        use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
         use wasmtime_wasi::preview1::{self, WasiP1Ctx};
         use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
@@ -338,7 +338,7 @@ impl SandboxedExecutor {
     async fn execute_docker(&self, image: &str, cmd: &str, args: Vec<String>, working_dir: &Path, memory_limit: Option<i64>, cpu_quota: Option<i64>) -> Result<String> {
         let docker = Docker::connect_with_local_defaults()?;
         
-        let mut pull_stream = docker.create_image(Some(CreateImageOptions { from_image: image.to_string(), ..Default::default() }), None, None);
+        let mut pull_stream = docker.create_image(Some(CreateImageOptions { from_image: Some(image.to_string()), ..Default::default() }), None, None);
         while let Some(res) = pull_stream.next().await { res?; }
 
         let abs_root = working_dir.canonicalize()?.to_string_lossy().to_string();
@@ -364,11 +364,11 @@ impl SandboxedExecutor {
             ..Default::default()
         };
 
-        let container = docker.create_container::<String, String>(None, config).await?;
+        let container = docker.create_container(None, config).await?;
         
         let result = async {
-            docker.start_container::<String>(&container.id, None).await?;
-            let mut logs = docker.logs(&container.id, Some(bollard::container::LogsOptions::<String> { stdout: true, stderr: true, follow: true, ..Default::default() }));
+            docker.start_container(&container.id, None).await?;
+            let mut logs = docker.logs(&container.id, Some(LogsOptions { stdout: true, stderr: true, follow: true, ..Default::default() }));
 
             let mut output = String::new();
             while let Some(log_result) = logs.next().await {
@@ -387,7 +387,7 @@ impl SandboxedExecutor {
                 // Attempt force removal
                 let _ = docker.remove_container(
                     &container.id, 
-                    Some(bollard::container::RemoveContainerOptions {
+                    Some(RemoveContainerOptions {
                         force: true,
                         ..Default::default()
                     })

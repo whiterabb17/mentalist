@@ -44,6 +44,7 @@ impl SkillExecutor {
             return Ok(());
         }
 
+        let mut next_skills = HashMap::new();
         let mut read_dir = fs::read_dir(&self.skills_root).await?;
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
@@ -52,7 +53,7 @@ impl SkillExecutor {
                 if skill_file.exists() {
                     match self.load_skill(&path).await {
                         Ok(skill) => {
-                            self.skills.insert(skill.metadata.name.clone(), Arc::new(skill));
+                            next_skills.insert(skill.metadata.name.clone(), Arc::new(skill));
                         }
                         Err(e) => {
                             tracing::error!("Failed to load skill at {:?}: {}", path, e);
@@ -61,6 +62,7 @@ impl SkillExecutor {
                 }
             }
         }
+        self.skills = next_skills;
         Ok(())
     }
 
@@ -69,17 +71,27 @@ impl SkillExecutor {
         
         let (frontmatter, instructions) = if content.starts_with("---") {
             let parts: Vec<&str> = content.splitn(3, "---").collect();
-            if parts.len() == 3 {
-                (parts[1], parts[2].trim())
-            } else {
-                ("", content.trim())
+            match parts.len() {
+                3 => (parts[1], parts[2].trim()),
+                _ => anyhow::bail!("Invalid SKILL.md frontmatter separator"),
             }
         } else {
-            ("", content.trim())
+            anyhow::bail!("SKILL.md must start with --- for frontmatter");
         };
+
+        if frontmatter.trim().is_empty() {
+            anyhow::bail!("Empty frontmatter in SKILL.md");
+        }
 
         let metadata: SkillMetadata = serde_yaml::from_str(frontmatter)
             .context("Failed to parse SKILL.md frontmatter")?;
+
+        if metadata.name.is_empty() {
+            anyhow::bail!("Skill name is required");
+        }
+        if metadata.description.is_empty() {
+            anyhow::bail!("Skill description is required");
+        }
 
         Ok(Skill {
             path: path.to_path_buf(),
@@ -92,54 +104,79 @@ impl SkillExecutor {
 #[async_trait]
 impl ToolExecutor for SkillExecutor {
     async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
+        // Validate skill name
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            anyhow::bail!("Invalid skill name: {} (only alphanumeric, _, - allowed)", name);
+        }
+        
         let skill = self.skills.get(name).context(format!("Skill '{}' not found", name))?;
         
-        // According to agentskills.io, we prioritize executing scripts if they exist
-        let scripts_dir = skill.path.join("scripts");
-        if scripts_dir.exists() {
-            // Check for common entry points: name.sh, name.py, name.js
-            let possible_scripts = [
-                format!("{}.sh", name),
-                format!("{}.py", name),
-                format!("{}.js", name),
-                "run.sh".to_string(),
-                "run.py".to_string(),
-            ];
-
-            for script_name in possible_scripts {
-                let script_path = scripts_dir.join(&script_name);
-                if script_path.exists() {
-                    let mut cmd = if script_name.ends_with(".sh") {
-                        let mut c = tokio::process::Command::new("bash");
-                        c.arg(&script_path);
-                        c
-                    } else if script_name.ends_with(".py") {
-                        let mut c = tokio::process::Command::new("python");
-                        c.arg(&script_path);
-                        c
-                    } else if script_name.ends_with(".js") {
-                        let mut c = tokio::process::Command::new("node");
-                        c.arg(&script_path);
-                        c
-                    } else {
-                        tokio::process::Command::new(&script_path)
-                    };
-
-                    // Pass arguments as JSON string
-                    cmd.arg(serde_json::to_string(&args)?);
-                    cmd.current_dir(&skill.path);
-                    
-                    let output = cmd.output().await?;
-                    if !output.status.success() {
-                        return Err(anyhow!("Skill script failed: {}", String::from_utf8_lossy(&output.stderr)));
-                    }
-                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-                }
-            }
+        let canonical_skill_path = skill.path.canonicalize()?;
+        let canonical_skills_root = self.skills_root.canonicalize()?;
+        
+        if !canonical_skill_path.starts_with(&canonical_skills_root) {
+            anyhow::bail!("Skill path escapes skills directory");
         }
 
-        // If no script, returning instructions might be used to indicate "activation" 
-        // leading to full injection by middleware.
+        let scripts_dir = canonical_skill_path.join("scripts");
+        if !scripts_dir.exists() {
+            return Ok(format!("Skill '{}' activated. Instructions loaded into context.", name));
+        }
+
+        let allowed_scripts = ["run.sh", "run.py", "run.js"];
+        let mut found_script = false;
+
+        for script_name in allowed_scripts {
+            let script_path = scripts_dir.join(script_name);
+            if !script_path.exists() || !script_path.is_file() {
+                continue;
+            }
+            
+            // Verify it's not a symlink
+            if script_path.symlink_metadata()?.file_type().is_symlink() {
+                tracing::warn!("Skipping symlink script: {:?}", script_path);
+                continue;
+            }
+            
+            found_script = true;
+
+            let mut cmd = if script_name.ends_with(".sh") {
+                let mut c = tokio::process::Command::new("bash");
+                c.arg(&script_path);
+                c
+            } else if script_name.ends_with(".py") {
+                let mut c = tokio::process::Command::new("python");
+                c.arg(&script_path);
+                c
+            } else if script_name.ends_with(".js") {
+                let mut c = tokio::process::Command::new("node");
+                c.arg(&script_path);
+                c
+            } else {
+                continue;
+            };
+
+            cmd.arg(serde_json::to_string(&args)?);
+            cmd.current_dir(&canonical_skill_path);
+            
+            let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
+                .await
+                .map_err(|_| anyhow!("Skill script execution timed out after 30s"))??;
+
+            if !output.status.success() {
+                return Err(anyhow!("Skill script failed: {}", String::from_utf8_lossy(&output.stderr)));
+            }
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+
+        if !found_script {
+            anyhow::bail!(
+                "No executable script found in {:?}. Looked for: {:?}",
+                scripts_dir,
+                allowed_scripts
+            );
+        }
+
         Ok(format!("Skill '{}' activated. Instructions loaded into context.", name))
     }
 
