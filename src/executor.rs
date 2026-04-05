@@ -180,9 +180,40 @@ impl ToolExecutor for SandboxedExecutor {
     }
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
-        // For now, SandboxedExecutor doesn't explicitly expose its tools for discovery 
-        // as they are usually defined globally in the system prompt.
-        Ok(vec![])
+        let mut tools = Vec::new();
+        for cmd in &self.validator.allowed_cmds {
+            let description = match cmd.as_str() {
+                "ls" => "List directory contents.",
+                "cat" => "Read and display file content.",
+                "grep" => "Search for patterns in files.",
+                "find" => "Search for files in a directory hierarchy.",
+                "python" | "python3" => "Execute a Python script or command.",
+                "node" => "Execute a Node.js script or command.",
+                "bash" | "sh" => "Execute a shell script or command.",
+                "curl" | "wget" => "Transfer data from or to a server.",
+                "tar" | "zip" => "Archive or compress files.",
+                "jq" => "Process and filter JSON data.",
+                "echo" => "Display a line of text.",
+                _ => "Execute a system command.",
+            };
+
+            tools.push(ToolDefinition {
+                name: cmd.clone(),
+                description: description.to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Arguments to pass to the command."
+                        }
+                    },
+                    "required": ["args"]
+                }),
+            });
+        }
+        Ok(tools)
     }
 }
 

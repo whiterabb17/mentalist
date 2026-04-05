@@ -146,10 +146,13 @@ impl DeepAgent {
                     Err(anyhow::anyhow!("Agent step timeout after {}s", config.timeout_seconds))?;
                 }
 
+                // Fetch tools from the executor
+                let tools = self.executor.list_tools().await.unwrap_or_default();
+                
                 let req = Request {
                     prompt: if turn_count == 1 { user_input.clone() } else { "Continue".to_string() },
                     context: self.state.context.clone(), // Cheap Arc clone
-                    tools: vec![],
+                    tools,
                 };
 
                 let mut stream = self.harness.run_stream(req).await?;
