@@ -1,18 +1,20 @@
 use mentalist::executor::{SandboxedExecutor, ExecutionMode, CommandValidator, ToolExecutor};
+use std::path::Path;
 use serde_json::json;
 
 #[tokio::test]
 async fn test_command_validator_blocking() {
     let validator = CommandValidator::new_default();
+    let root = Path::new("/");
     
     // Assert commands not in whitelist are blocked
-    assert!(validator.validate("rm", &vec!["-rf".to_string(), "/".to_string()]).is_err());
-    assert!(validator.validate("chmod", &vec!["777".to_string(), "file".to_string()]).is_err());
-    assert!(validator.validate("mkfs", &vec!["/dev/sda1".to_string()]).is_err());
+    assert!(validator.validate("rm", &vec!["-rf".to_string(), "/".to_string()], root).is_err());
+    assert!(validator.validate("chmod", &vec!["777".to_string(), "file".to_string()], root).is_err());
+    assert!(validator.validate("mkfs", &vec!["/dev/sda1".to_string()], root).is_err());
     
     // Assert safe whitelisted commands are allowed
-    assert!(validator.validate("ls", &vec!["-la".to_string()]).is_ok());
-    assert!(validator.validate("cat", &vec!["README.md".to_string()]).is_ok());
+    assert!(validator.validate("ls", &vec!["-la".to_string()], root).is_ok());
+    assert!(validator.validate("cat", &vec!["README.md".to_string()], root).is_ok());
 }
 
 #[tokio::test]

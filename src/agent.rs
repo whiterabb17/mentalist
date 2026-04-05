@@ -50,7 +50,7 @@ impl Default for StepConfig {
 /// use std::path::PathBuf;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let provider = Box::new(OpenAiProvider::new("gpt-4o".into(), "key".into()));
+/// let provider = Arc::new(OpenAiProvider::new("gpt-4o".into(), "key".into()));
 /// let harness = Harness::new(provider);
 /// let state = DeepAgentState {
 ///     session_id: "example".into(),
@@ -63,7 +63,7 @@ impl Default for StepConfig {
 /// let storage = mem_core::FileStorage::new(std::path::PathBuf::from("."));
 /// let memory = Arc::new(mem_resilience::ResilientMemoryController::new(brain, storage, 3));
 ///
-/// let mut agent = DeepAgent::new(harness, state, executor, memory);
+/// let mut agent = DeepAgent::new(harness, state, executor, memory, None);
 /// let response = agent.step("Calculate 123 * 456".into()).await?;
 /// println!("Agent says: {}", response);
 /// # Ok(())

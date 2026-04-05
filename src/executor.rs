@@ -38,7 +38,7 @@ impl CommandValidator {
         }
     }
 
-    pub fn validate(&self, cmd: &str, args: &[String]) -> Result<()> {
+    pub fn validate(&self, cmd: &str, args: &[String], root_dir: &Path) -> Result<()> {
         // 1. Whitelist approach
         if !self.allowed_cmds.contains(&cmd.to_string()) {
             bail!("Command '{}' is not in the whitelist of allowed tools", cmd);
@@ -50,9 +50,21 @@ impl CommandValidator {
                 bail!("Argument contains potentially dangerous shell characters: {}", arg);
             }
             
-            // 3. Path traversal check
-            if arg.contains("..") || arg.starts_with('/') {
-                bail!("Argument appears to be a path traversal attempt or absolute path: {}", arg);
+            // 3. Path expansion/traversal check
+            if arg.contains("..") {
+                bail!("Argument appears to be a path traversal attempt (..): {}", arg);
+            }
+
+            if arg.starts_with('/') {
+                let path = Path::new(arg);
+                // Allow absolute paths ONLY if they are children of root_dir
+                if !path.starts_with(root_dir) {
+                    bail!("Access Denied: Absolute path '{}' is outside the sandbox root '{:?}'", arg, root_dir);
+                }
+            }
+
+            if arg.starts_with('~') {
+                 bail!("Access Denied: Home directory expansion (~) is not allowed in sandbox: {}", arg);
             }
         }
 
@@ -161,7 +173,7 @@ impl ToolExecutor for SandboxedExecutor {
             vec![]
         };
 
-        self.validator.validate(name, &args_vec)?;
+        self.validator.validate(name, &args_vec, &self.root_dir)?;
 
         // If vault is set, we use it as the working directory / mount point for writes
         let working_dir = self.vault_dir.as_ref().unwrap_or(&self.root_dir);
