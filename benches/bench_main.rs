@@ -16,13 +16,6 @@ impl mem_core::LlmClient for NoOpModel {
 }
 
 #[async_trait]
-impl mem_core::LlmClient for NoOpModel {
-    async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
-        Ok("Bench Completion".into())
-    }
-}
-
-#[async_trait]
 impl ModelProvider for NoOpModel {
     async fn complete(&self, _req: Request) -> anyhow::Result<Response> {
         Ok(Response { content: "ok".into(), tool_calls: vec![] })
@@ -31,7 +24,6 @@ impl ModelProvider for NoOpModel {
         Ok(Box::pin(stream::empty()))
     }
 }
-
 struct NoOpMiddleware;
 #[async_trait]
 impl Middleware for NoOpMiddleware {
