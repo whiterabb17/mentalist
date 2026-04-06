@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody as Config, HostConfig};
+use once_cell::sync::Lazy;
 use bollard::query_parameters::{CreateImageOptions, LogsOptions, RemoveContainerOptions};
 use bollard::Docker;
 use futures_util::stream::StreamExt;
@@ -180,9 +181,25 @@ pub struct SandboxedExecutor {
     /// The validator used to check commands and arguments for safety.
     pub validator: CommandValidator,
     pub middlewares: Vec<Arc<dyn Middleware>>,
-    #[cfg(feature = "wasm-tools")]
-    pub engine: Option<Arc<wasmtime::Engine>>,
 }
+
+/// Global Wasm Engine to conserve virtual memory and address space on Windows.
+/// Initialized once per process to prevent fragmentation during tool discovery.
+#[cfg(feature = "wasm-tools")]
+pub static ENGINE: Lazy<Arc<wasmtime::Engine>> = Lazy::new(|| {
+    let mut config = wasmtime::Config::new();
+    config
+        .async_support(true)
+        .consume_fuel(true)
+        .max_wasm_stack(1024 * 1024)
+        // Hardened Windows Strategy: 
+        // Force dynamic growth to minimize initial address space reservation.
+        .memory_may_move(true)
+        .memory_reservation(256 * 1024 * 1024) // 256MB initial reservation floor
+        .memory_guard_size(0);
+    
+    Arc::new(wasmtime::Engine::new(&config).expect("Failed to initialize global Wasm Engine"))
+});
 
 impl SandboxedExecutor {
     pub fn new(mode: ExecutionMode, root_dir: PathBuf, vault_dir: Option<PathBuf>) -> Result<Self> {
@@ -218,35 +235,12 @@ impl SandboxedExecutor {
             _ => {}
         }
 
-        let validator = CommandValidator::new_default();
-        
-        #[cfg(feature = "wasm-tools")]
-        let engine = if matches!(mode, ExecutionMode::Wasm { .. }) {
-            let mut config = wasmtime::Config::new();
-            config
-                .async_support(true)
-                .consume_fuel(true)
-                .max_wasm_stack(1024 * 1024) // 1MB stack
-                // Windows address space hardening: Use dynamic allocation strategy
-                // to prevent massive 4GB-8GB virtual address space reservations
-                // that trigger STATUS_STACK_BUFFER_OVERRUN on fragmented systems.
-                .memory_may_move(true)
-                .memory_reservation(1024 * 1024 * 1024)
-                .memory_guard_size(0);
-            
-            Some(Arc::new(wasmtime::Engine::new(&config)?))
-        } else {
-            None
-        };
-
         Ok(Self {
             mode,
             root_dir,
             vault_dir,
-            validator,
+            validator: CommandValidator::new_default(),
             middlewares: Vec::new(),
-            #[cfg(feature = "wasm-tools")]
-            engine,
         })
     }
 
@@ -326,11 +320,8 @@ impl ToolExecutor for SandboxedExecutor {
                 wasm_args.extend(args_vec);
 
                 #[cfg(feature = "wasm-tools")]
-                let engine = self.engine.as_ref().context("Wasm engine not initialized")?;
-
-                #[cfg(feature = "wasm-tools")]
                 let res = self.execute_wasm(
-                    engine.clone(),
+                    ENGINE.clone(),
                     module_path.as_ref(),
                     *mount_root,
                     wasm_args,
@@ -890,30 +881,12 @@ impl DynamicExecutorLoader {
             _ => ExecutionMode::Local,
         };
 
-        #[cfg(feature = "wasm-tools")]
-        let engine = if matches!(default_mode, ExecutionMode::Wasm { .. }) {
-            let mut w_config = wasmtime::Config::new();
-            w_config
-                .async_support(true)
-                .consume_fuel(true)
-                .max_wasm_stack(1024 * 1024)
-                .memory_may_move(true)
-                .memory_reservation(1024 * 1024 * 1024)
-                .memory_guard_size(0);
-            
-            Some(Arc::new(wasmtime::Engine::new(&w_config)?))
-        } else {
-            None
-        };
-
         let executor = SandboxedExecutor {
             mode: default_mode,
             root_dir: config.sandbox_root.clone(),
             vault_dir: config.vault_dir.clone(),
             validator,
             middlewares: Vec::new(),
-            #[cfg(feature = "wasm-tools")]
-            engine,
         };
 
         multi.add_executor("default".to_string(), Arc::new(executor)).await;

@@ -53,8 +53,14 @@ impl Harness {
     /// Orchestrated Execution Loop following DeepAgent methodology.
     #[tracing::instrument(skip(self, req), fields(prompt_len = req.prompt.len()))]
     pub async fn run(&self, mut req: Request) -> crate::error::Result<Response> {
-        // Recursion guard: prevent infinite loops (e.g. middleware calls harness recursively)
+        // 1. Hook: before_ai_call (Context Optimization/Planning)
         let depth = self.call_depth.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if depth > 0 {
+            tracing::debug!(depth, "Harness recursion detected");
+        }
+        if depth > 5 {
+            tracing::warn!(depth, "High harness recursion depth detected. Check for middleware loops.");
+        }
         if depth > 10 {
             self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             return Err(crate::error::MentalistError::Internal("Infinite recursion detected in Harness (depth > 10)".into()));

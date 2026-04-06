@@ -43,6 +43,7 @@ wasmtime = { version = "36.0.6", features = ["async"] }
 wasmtime-wasi = { version = "36.0.6", features = ["preview1"] }
 ruvector-core = "2.1"
 ruvector-graph = "2.0.6"
+once_cell = "1.20"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
