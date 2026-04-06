@@ -168,7 +168,7 @@ impl ToolExecutor for SkillExecutor {
 
             let args_str = serde_json::to_string(&args)?;
             // Validate the arguments before spawning the script
-            self.validator.validate(name, &[args_str.clone()], &self.skills_root)?;
+            self.validator.validate(name, std::slice::from_ref(&args_str), &self.skills_root)?;
 
             cmd.arg(args_str);
             cmd.current_dir(&canonical_skill_path);

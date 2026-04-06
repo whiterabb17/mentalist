@@ -128,8 +128,10 @@ impl MindPalaceMiddleware {
         dimension: usize,
         vault_path: PathBuf,
     ) -> Self {
-        let mut config = MindPalaceConfig::default();
-        config.max_context_items = 50; // Standard threshold for deep focus
+        let config = MindPalaceConfig {
+            max_context_items: 50, // Standard threshold for deep focus
+            ..Default::default()
+        };
 
         let mut brain = Brain::new(config.clone(), None, Some(token_counter));
 

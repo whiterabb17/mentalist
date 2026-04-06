@@ -37,12 +37,14 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
+type McpStdio = Option<(tokio::process::ChildStdin, tokio::io::BufReader<tokio::process::ChildStdout>)>;
+
 pub struct McpExecutor {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     process: Arc<Mutex<Option<Child>>>,
-    stdio: Arc<Mutex<Option<(tokio::process::ChildStdin, tokio::io::BufReader<tokio::process::ChildStdout>)>>>,
+    stdio: Arc<Mutex<McpStdio>>,
     call_lock: Arc<Mutex<()>>,
     id_counter: AtomicI64,
     last_error: Arc<Mutex<Option<String>>>,

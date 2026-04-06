@@ -56,7 +56,7 @@ impl ModelProvider for MockToolModel {
                 is_final: true,
             }));
         }
-        if chunks.is_empty() || !chunks.last().unwrap().as_ref().map_or(false, |c| c.is_final) {
+        if chunks.is_empty() || !chunks.last().unwrap().as_ref().is_ok_and(|c| c.is_final) {
             chunks.push(Ok(ResponseChunk {
                content_delta: None,
                tool_call_delta: None,
@@ -222,12 +222,9 @@ async fn test_wasm_execution_smoke() {
     let temp_dir = std::env::temp_dir().join("mentalist_wasm_test");
     std::fs::create_dir_all(&temp_dir).unwrap();
     
-    // Path to the built wasm_tools binary
+    // Path to the wasm_tools binary in the root of the wasm_tools directory
     let wasm_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("wasm_tools")
-        .join("target")
-        .join("wasm32-wasip1")
-        .join("release")
         .join("wasm_tools.wasm");
         
     if !wasm_path.exists() {
