@@ -1,5 +1,4 @@
-use mentalist::config::{MentalistConfig, AgentConfig, SecurityConfig, ExecutorConfig};
-use std::path::PathBuf;
+use mentalist::config::{MentalistConfig, SecurityConfig};
 
 #[test]
 fn test_default_config() {

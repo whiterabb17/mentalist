@@ -3,10 +3,9 @@ use mentalist::middleware::{MindPalaceMiddleware, LoggingMiddleware};
 use mentalist::provider::OllamaProvider;
 use mentalist::executor::{SandboxedExecutor, ExecutionMode};
 use mentalist::Harness;
-use mem_core::{FileStorage, Context};
+use mem_core::{FileStorage, Context, MindPalaceConfig};
 use mem_resilience::ResilientMemoryController;
 use std::sync::Arc;
-use std::path::PathBuf;
 
 #[tokio::test]
 async fn test_ollama_real_world_interaction() {
@@ -20,8 +19,15 @@ async fn test_ollama_real_world_interaction() {
         "http://127.0.0.1:11434".to_string(), 
         model, 
         embedding_model, 
-        Some(2048)
+        Some(32768)
     ));
+    let token_counter = provider.clone();
+    
+    let mp_config = MindPalaceConfig {
+        similarity_threshold: 0.85,
+        model_context_window: 16384, // 16k tokens of memory context
+        ..MindPalaceConfig::default()
+    };
     
     // 1. Setup temporary storage for the "brain"
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
