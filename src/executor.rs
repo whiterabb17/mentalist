@@ -218,7 +218,7 @@ impl SandboxedExecutor {
             _ => {}
         }
 
-        let mut validator = CommandValidator::new_default();
+        let validator = CommandValidator::new_default();
         
         #[cfg(feature = "wasm-tools")]
         let engine = if matches!(mode, ExecutionMode::Wasm { .. }) {
@@ -227,11 +227,12 @@ impl SandboxedExecutor {
                 .async_support(true)
                 .consume_fuel(true)
                 .max_wasm_stack(1024 * 1024) // 1MB stack
-                // Windows address space hardening: Use conservative static reservation (1GB)
-                // and disable large guard pages to prevent 1.5GB+ allocation failures.
-                .static_memory_maximum_size(1024 * 1024 * 1024)
-                .static_memory_guard_size(0)
-                .dynamic_memory_guard_size(0);
+                // Windows address space hardening: Use dynamic allocation strategy
+                // to prevent massive 4GB-8GB virtual address space reservations
+                // that trigger STATUS_STACK_BUFFER_OVERRUN on fragmented systems.
+                .memory_may_move(true)
+                .memory_reservation(1024 * 1024 * 1024)
+                .memory_guard_size(0);
             
             Some(Arc::new(wasmtime::Engine::new(&config)?))
         } else {
@@ -896,9 +897,9 @@ impl DynamicExecutorLoader {
                 .async_support(true)
                 .consume_fuel(true)
                 .max_wasm_stack(1024 * 1024)
-                .static_memory_maximum_size(1024 * 1024 * 1024)
-                .static_memory_guard_size(0)
-                .dynamic_memory_guard_size(0);
+                .memory_may_move(true)
+                .memory_reservation(1024 * 1024 * 1024)
+                .memory_guard_size(0);
             
             Some(Arc::new(wasmtime::Engine::new(&w_config)?))
         } else {
