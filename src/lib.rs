@@ -21,6 +21,7 @@ use futures_util::stream::{BoxStream, StreamExt};
 ///
 /// `Harness` wraps a `ModelProvider` and a sequence of `Middleware` hooks.
 /// It is responsible for orchestrating the reasoning loop and tool execution callbacks.
+#[derive(Clone)]
 pub struct Harness {
     pub provider: Arc<dyn ModelProvider>,
     pub middlewares: Vec<Arc<dyn middleware::Middleware>>,
