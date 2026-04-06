@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody as Config, HostConfig};
@@ -180,6 +180,8 @@ pub struct SandboxedExecutor {
     /// The validator used to check commands and arguments for safety.
     pub validator: CommandValidator,
     pub middlewares: Vec<Arc<dyn Middleware>>,
+    #[cfg(feature = "wasm-tools")]
+    pub engine: Option<Arc<wasmtime::Engine>>,
 }
 
 impl SandboxedExecutor {
@@ -216,12 +218,34 @@ impl SandboxedExecutor {
             _ => {}
         }
 
+        let mut validator = CommandValidator::new_default();
+        
+        #[cfg(feature = "wasm-tools")]
+        let engine = if matches!(mode, ExecutionMode::Wasm { .. }) {
+            let mut config = wasmtime::Config::new();
+            config
+                .async_support(true)
+                .consume_fuel(true)
+                .max_wasm_stack(1024 * 1024) // 1MB stack
+                // Windows address space hardening: Use conservative static reservation (1GB)
+                // and disable large guard pages to prevent 1.5GB+ allocation failures.
+                .static_memory_maximum_size(1024 * 1024 * 1024)
+                .static_memory_guard_size(0)
+                .dynamic_memory_guard_size(0);
+            
+            Some(Arc::new(wasmtime::Engine::new(&config)?))
+        } else {
+            None
+        };
+
         Ok(Self {
             mode,
             root_dir,
             vault_dir,
-            validator: CommandValidator::new_default(),
+            validator,
             middlewares: Vec::new(),
+            #[cfg(feature = "wasm-tools")]
+            engine,
         })
     }
 
@@ -299,14 +323,25 @@ impl ToolExecutor for SandboxedExecutor {
             } => {
                 let mut wasm_args = vec!["tool_runtime".to_string(), tool_call.name.clone()];
                 wasm_args.extend(args_vec);
-                self.execute_wasm(
+
+                #[cfg(feature = "wasm-tools")]
+                let engine = self.engine.as_ref().context("Wasm engine not initialized")?;
+
+                #[cfg(feature = "wasm-tools")]
+                let res = self.execute_wasm(
+                    engine.clone(),
                     module_path.as_ref(),
                     *mount_root,
                     wasm_args,
                     working_dir,
                     env_vars,
                 )
-                .await
+                .await;
+
+                #[cfg(not(feature = "wasm-tools"))]
+                let res = Err(anyhow::anyhow!("Wasm tools feature disabled").into());
+
+                res
             }
         };
 
@@ -426,6 +461,7 @@ impl SandboxedExecutor {
 
     async fn execute_wasm(
         &self,
+        engine: Arc<wasmtime::Engine>,
         module_path: Option<&PathBuf>,
         mount_root: bool,
         args: Vec<String>,
@@ -436,15 +472,6 @@ impl SandboxedExecutor {
         use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
         use wasmtime_wasi::preview1::{self, WasiP1Ctx};
         use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
-
-        // 1. Engine Hardening: 4GB memory, Fuel enabled
-        let mut config = wasmtime::Config::new();
-        config
-            .async_support(true)
-            .consume_fuel(true)
-            .max_wasm_stack(1024 * 1024); // 1MB stack
-
-        let engine = Engine::new(&config)?;
 
         let module = if let Some(path) = module_path {
             Module::from_file(&engine, path)?
@@ -862,12 +889,30 @@ impl DynamicExecutorLoader {
             _ => ExecutionMode::Local,
         };
 
+        #[cfg(feature = "wasm-tools")]
+        let engine = if matches!(default_mode, ExecutionMode::Wasm { .. }) {
+            let mut w_config = wasmtime::Config::new();
+            w_config
+                .async_support(true)
+                .consume_fuel(true)
+                .max_wasm_stack(1024 * 1024)
+                .static_memory_maximum_size(1024 * 1024 * 1024)
+                .static_memory_guard_size(0)
+                .dynamic_memory_guard_size(0);
+            
+            Some(Arc::new(wasmtime::Engine::new(&w_config)?))
+        } else {
+            None
+        };
+
         let executor = SandboxedExecutor {
             mode: default_mode,
             root_dir: config.sandbox_root.clone(),
             vault_dir: config.vault_dir.clone(),
             validator,
             middlewares: Vec::new(),
+            #[cfg(feature = "wasm-tools")]
+            engine,
         };
 
         multi.add_executor("default".to_string(), Arc::new(executor)).await;
