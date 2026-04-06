@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody as Config, HostConfig};
+#[cfg(feature = "wasm-tools")]
 use once_cell::sync::Lazy;
 use bollard::query_parameters::{CreateImageOptions, LogsOptions, RemoveContainerOptions};
 use bollard::Docker;
@@ -331,7 +332,10 @@ impl ToolExecutor for SandboxedExecutor {
                 .await;
 
                 #[cfg(not(feature = "wasm-tools"))]
-                let res = Err(anyhow::anyhow!("Wasm tools feature disabled").into());
+                let res = {
+                    let _ = (module_path, mount_root, env_vars);
+                    Err(anyhow::anyhow!("Wasm tools feature disabled").into())
+                };
 
                 res
             }
@@ -451,6 +455,7 @@ impl SandboxedExecutor {
         Err(ToolError::NotFound(format!("program not found (last tried: {}). Original error: {:?}", cmd, last_error)).into())
     }
 
+    #[cfg(feature = "wasm-tools")]
     async fn execute_wasm(
         &self,
         engine: Arc<wasmtime::Engine>,
