@@ -43,8 +43,12 @@ impl Harness {
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
                 let mw_name = mw.name();
-                tracing::error!("Middleware '{}' failure in before_ai_call: {}", mw_name, e);
-                return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
+                if mw.is_critical() {
+                    tracing::error!("Critical middleware '{}' failure in before_ai_call: {}", mw_name, e);
+                    return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
+                } else {
+                    tracing::warn!("Non-critical middleware '{}' failure in before_ai_call: {}. Continuing.", mw_name, e);
+                }
             }
         }
 
@@ -55,8 +59,12 @@ impl Harness {
         for mw in &self.middlewares {
             if let Err(e) = mw.after_ai_call(&mut res).await {
                 let mw_name = mw.name();
-                tracing::error!("Middleware '{}' failure in after_ai_call: {}", mw_name, e);
-                return Err(e.context(format!("Middleware '{}' failure in after_ai_call", mw_name)));
+                if mw.is_critical() {
+                    tracing::error!("Critical middleware '{}' failure in after_ai_call: {}", mw_name, e);
+                    return Err(e.context(format!("Middleware '{}' failure in after_ai_call", mw_name)));
+                } else {
+                    tracing::warn!("Non-critical middleware '{}' failure in after_ai_call: {}. Continuing.", mw_name, e);
+                }
             }
         }
 
@@ -69,8 +77,12 @@ impl Harness {
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
                 let mw_name = mw.name();
-                tracing::error!("Middleware '{}' failure in before_ai_call: {}", mw_name, e);
-                return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
+                if mw.is_critical() {
+                    tracing::error!("Critical middleware '{}' failure in before_ai_call: {}", mw_name, e);
+                    return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
+                } else {
+                    tracing::warn!("Non-critical middleware '{}' failure in before_ai_call: {}. Continuing.", mw_name, e);
+                }
             }
         }
 
@@ -114,8 +126,12 @@ impl Harness {
         for mw in &self.middlewares {
             if let Err(e) = mw.before_tool_call(tool).await {
                 let mw_name = mw.name();
-                tracing::error!("Middleware '{}' failure in before_tool_call: {}", mw_name, e);
-                return Err(e.context(format!("Middleware '{}' failure in before_tool_call", mw_name)));
+                if mw.is_critical() {
+                    tracing::error!("Critical middleware '{}' failure in before_tool_call: {}", mw_name, e);
+                    return Err(e.context(format!("Middleware '{}' failure in before_tool_call", mw_name)));
+                } else {
+                    tracing::warn!("Non-critical middleware '{}' failure in before_tool_call: {}. Continuing.", mw_name, e);
+                }
             }
         }
         Ok(())
@@ -126,8 +142,12 @@ impl Harness {
         for mw in &self.middlewares {
             if let Err(e) = mw.after_tool_call(tool, result).await {
                 let mw_name = mw.name();
-                tracing::error!("Middleware '{}' failure in after_tool_call: {}", mw_name, e);
-                return Err(e.context(format!("Middleware '{}' failure in after_tool_call", mw_name)));
+                if mw.is_critical() {
+                    tracing::error!("Critical middleware '{}' failure in after_tool_call: {}", mw_name, e);
+                    return Err(e.context(format!("Middleware '{}' failure in after_tool_call", mw_name)));
+                } else {
+                    tracing::warn!("Non-critical middleware '{}' failure in after_tool_call: {}. Continuing.", mw_name, e);
+                }
             }
         }
         Ok(())
@@ -138,8 +158,12 @@ impl Harness {
         for mw in &self.middlewares {
             if let Err(e) = mw.optimize_context(ctx).await {
                 let mw_name = mw.name();
-                tracing::error!("Middleware '{}' failure in optimize_context: {}", mw_name, e);
-                return Err(e.context(format!("Middleware '{}' failure in optimize_context", mw_name)));
+                if mw.is_critical() {
+                    tracing::error!("Critical middleware '{}' failure in optimize_context: {}", mw_name, e);
+                    return Err(e.context(format!("Middleware '{}' failure in optimize_context", mw_name)));
+                } else {
+                    tracing::warn!("Non-critical middleware '{}' failure in optimize_context: {}. Continuing.", mw_name, e);
+                }
             }
         }
         Ok(())

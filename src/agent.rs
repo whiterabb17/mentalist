@@ -24,6 +24,7 @@ pub struct StepConfig {
     pub timeout_seconds: u64,
     pub fail_on_limit: bool,
     pub max_retries: usize,
+    pub max_context_items: usize,
 }
 
 impl Default for StepConfig {
@@ -33,6 +34,7 @@ impl Default for StepConfig {
             timeout_seconds: 300,
             fail_on_limit: false,
             max_retries: 3,
+            max_context_items: 50,
         }
     }
 }
@@ -131,6 +133,17 @@ impl DeepAgent {
             loop {
                 turn_count += 1;
                 
+                // Check context bounds and optimize if needed
+                if self.state.context.items.len() > config.max_context_items {
+                    yield AgentStepEvent::Status("Context limit reached. Optimizing...".into());
+                    let mut current_ctx = (*self.state.context).clone();
+                    if let Err(e) = self.harness.optimize_context(&mut current_ctx).await {
+                        tracing::error!("Auto-optimization failed: {}", e);
+                    } else {
+                        self.state.context = Arc::new(current_ctx);
+                    }
+                }
+
                 // Check turn limit
                 if turn_count > config.max_turns {
                     let msg = format!("Turn limit ({}) reached. Stopping.", config.max_turns);
@@ -179,13 +192,15 @@ impl DeepAgent {
                     }
 
                     if chunk.is_final && !current_tool_name.is_empty() {
-                        let arguments: serde_json::Value = serde_json::from_str(&current_tool_args)
+                        let fixed_args = Self::fix_json(&current_tool_args);
+                        let arguments: serde_json::Value = serde_json::from_str(&fixed_args)
                             .map_err(|e| {
-                                tracing::error!("Failed to parse tool arguments: {}. Raw: {}", e, current_tool_args);
-                                anyhow::anyhow!("Tool argument JSON parse error: {} for args: {}", e, current_tool_args)
+                                tracing::error!("Failed to parse tool arguments: {}. Raw: {}. Fixed: {}", e, current_tool_args, fixed_args);
+                                anyhow::anyhow!("Tool argument JSON parse error: {} for args: {}", e, fixed_args)
                             })?;
                         tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
                         current_tool_args.clear();
+                        current_tool_name.clear();
                     }
                 }
 
@@ -213,13 +228,22 @@ impl DeepAgent {
                             Err(e) => {
                                 let err_msg = format!("Tool error: {}", e);
                                 
-                                // Categorize error for smarter retry logic
-                                let error_text = e.to_string().to_lowercase();
-                                let error_category = match error_text.as_str() {
-                                    s if s.contains("timeout") => "transient_timeout",
-                                    s if s.contains("not found") => "tool_not_found",
-                                    s if s.contains("permission") || s.contains("denied") => "permission_denied",
-                                    _ => "unknown",
+                                // Categorize error for smarter retry logic using structured variants if available
+                                let error_category = if let Some(te) = e.downcast_ref::<crate::executor::ToolError>() {
+                                    match te {
+                                        crate::executor::ToolError::Transient(_) => "transient_timeout",
+                                        crate::executor::ToolError::NotFound(_) => "tool_not_found",
+                                        crate::executor::ToolError::PermissionDenied(_) => "permission_denied",
+                                        crate::executor::ToolError::ExecutionFailed(_) => "execution_failed",
+                                    }
+                                } else {
+                                    let error_text = e.to_string().to_lowercase();
+                                    match error_text.as_str() {
+                                        s if s.contains("timeout") => "transient_timeout",
+                                        s if s.contains("not found") => "tool_not_found",
+                                        s if s.contains("permission") || s.contains("denied") => "permission_denied",
+                                        _ => "unknown",
+                                    }
                                 };
 
                                 if error_category == "transient_timeout" && retry_count < config.max_retries {
@@ -231,7 +255,7 @@ impl DeepAgent {
                                     continue;
                                 }
                                 
-                                break Err((err_msg, error_category));
+                                break Err((err_msg, error_category.to_string()));
                             }
                         }
                     };
@@ -295,6 +319,34 @@ impl DeepAgent {
         tokio::fs::rename(&temp_file, path).await?;
         
         Ok(())
+    }
+
+    /// Simple heuristic fixer for malformed JSON deltas
+    fn fix_json(s: &str) -> String {
+        let s = s.trim();
+        if s.is_empty() { return "{}".into(); }
+        
+        let mut fixed = s.to_string();
+        
+        // Remove trailing comma which models often leave before closing
+        if fixed.ends_with(',') {
+            fixed.pop();
+        }
+
+        // Close unclosed structures
+        let open_braces = fixed.chars().filter(|&c| c == '{').count();
+        let close_braces = fixed.chars().filter(|&c| c == '}').count();
+        if open_braces > close_braces {
+            fixed.push_str(&"}".repeat(open_braces - close_braces));
+        }
+        
+        let open_brackets = fixed.chars().filter(|&c| c == '[').count();
+        let close_brackets = fixed.chars().filter(|&c| c == ']').count();
+        if open_brackets > close_brackets {
+            fixed.push_str(&"]".repeat(open_brackets - close_brackets));
+        }
+
+        fixed
     }
 }
 

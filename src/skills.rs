@@ -1,4 +1,4 @@
-use crate::executor::ToolExecutor;
+use crate::executor::{ToolExecutor, CommandValidator};
 use mem_core::ToolDefinition;
 use async_trait::async_trait;
 use anyhow::{Result, Context, anyhow};
@@ -27,6 +27,7 @@ pub struct Skill {
 pub struct SkillExecutor {
     pub skills_root: PathBuf,
     pub skills: HashMap<String, Arc<Skill>>,
+    pub validator: CommandValidator,
 }
 
 impl SkillExecutor {
@@ -34,6 +35,7 @@ impl SkillExecutor {
         let mut executor = Self {
             skills_root: root,
             skills: HashMap::new(),
+            validator: CommandValidator::new_default(),
         };
         executor.reload().await?;
         Ok(executor)
@@ -124,7 +126,6 @@ impl ToolExecutor for SkillExecutor {
         }
 
         let allowed_scripts = ["run.sh", "run.py", "run.js"];
-        let mut found_script = false;
 
         for script_name in allowed_scripts {
             let script_path = scripts_dir.join(script_name);
@@ -138,8 +139,6 @@ impl ToolExecutor for SkillExecutor {
                 continue;
             }
             
-            found_script = true;
-
             let mut cmd = if script_name.ends_with(".sh") {
                 let mut c = tokio::process::Command::new("bash");
                 c.arg(&script_path);
@@ -156,7 +155,11 @@ impl ToolExecutor for SkillExecutor {
                 continue;
             };
 
-            cmd.arg(serde_json::to_string(&args)?);
+            let args_str = serde_json::to_string(&args)?;
+            // Validate the arguments before spawning the script
+            self.validator.validate(name, &[args_str.clone()], &self.skills_root)?;
+
+            cmd.arg(args_str);
             cmd.current_dir(&canonical_skill_path);
             
             let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
@@ -169,15 +172,11 @@ impl ToolExecutor for SkillExecutor {
             return Ok(String::from_utf8_lossy(&output.stdout).to_string());
         }
 
-        if !found_script {
-            anyhow::bail!(
-                "No executable script found in {:?}. Looked for: {:?}",
-                scripts_dir,
-                allowed_scripts
-            );
-        }
-
-        Ok(format!("Skill '{}' activated. Instructions loaded into context.", name))
+        anyhow::bail!(
+            "No executable script found in {:?}. Looked for: {:?}",
+            scripts_dir,
+            allowed_scripts
+        );
     }
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {

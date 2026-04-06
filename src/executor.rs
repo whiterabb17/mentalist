@@ -13,6 +13,29 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::middleware::Middleware;
 use crate::ToolCall;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ToolError {
+    #[error("Transient failure (timeout/network): {0}")]
+    Transient(String),
+    #[error("Tool not found: {0}")]
+    NotFound(String),
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+    #[error("Execution failed: {0}")]
+    ExecutionFailed(String),
+}
+
+fn bytes_to_string_safe(bytes: &[u8]) -> String {
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!("Tool produced invalid UTF-8 output. Using lossy conversion.");
+            format!("[NON-UTF8 OUTPUT]: {}", String::from_utf8_lossy(bytes))
+        }
+    }
+}
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -366,30 +389,25 @@ impl SandboxedExecutor {
             match result {
                 Ok(output) => {
                     if !output.status.success() {
-                        let err = String::from_utf8_lossy(&output.stderr).to_string();
-                        bail!("Tool execution failed ({}): {}", attempt_cmd, err);
+                        let err = bytes_to_string_safe(&output.stderr);
+                        return Err(ToolError::ExecutionFailed(format!("{} -> {}", attempt_cmd, err)).into());
                     }
-                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+                    return Ok(bytes_to_string_safe(&output.stdout));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     last_error = Some(e);
                     continue; // Try next fallback
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Err(ToolError::PermissionDenied(attempt_cmd).into());
+                }
                 Err(e) => {
-                    bail!(
-                        "Local tool execution critical failure ({}): {}",
-                        attempt_cmd,
-                        e
-                    );
+                    return Err(ToolError::ExecutionFailed(format!("Critical failure ({}): {}", attempt_cmd, e)).into());
                 }
             }
         }
 
-        Err(anyhow::anyhow!(
-            "Local tool execution failed: program not found (last tried: {}). Original error: {:?}",
-            cmd,
-            last_error
-        ))
+        Err(ToolError::NotFound(format!("program not found (last tried: {}). Original error: {:?}", cmd, last_error)).into())
     }
 
     async fn execute_wasm(
@@ -513,7 +531,7 @@ impl SandboxedExecutor {
             }
         }
 
-        Ok(String::from_utf8_lossy(&stdout.contents()).to_string())
+        Ok(bytes_to_string_safe(&stdout.contents()))
     }
 
     async fn execute_docker(
@@ -564,6 +582,16 @@ impl SandboxedExecutor {
 
         let container = docker.create_container(None, config).await?;
 
+        // 3. Docker Resource Validation: Verify limits are applied
+        let inspected = docker.inspect_container(&container.id, None).await?;
+        if let Some(host_config) = inspected.host_config {
+            if let (Some(limit), Some(config_limit)) = (host_config.memory, memory_limit) {
+                if limit != config_limit {
+                    tracing::warn!("Docker container {} memory limit mismatch: expected {}, got {}", container.id, config_limit, limit);
+                }
+            }
+        }
+
         let result = async {
             docker.start_container(&container.id, None).await?;
             let mut logs = docker.logs(
@@ -576,13 +604,13 @@ impl SandboxedExecutor {
                 }),
             );
 
-            let mut output = String::new();
+            let mut output_bytes = Vec::new();
             while let Some(log_result) = logs.next().await {
                 if let LogOutput::StdOut { message } | LogOutput::StdErr { message } = log_result? {
-                    output.push_str(&String::from_utf8_lossy(&message));
+                    output_bytes.extend_from_slice(&message);
                 }
             }
-            Ok::<String, anyhow::Error>(output)
+            Ok::<String, anyhow::Error>(bytes_to_string_safe(&output_bytes))
         }
         .await;
 
@@ -639,26 +667,36 @@ impl SandboxedExecutor {
         const MAX_VAULT_SIZE: u64 = 1024 * 1024 * 100; // 100MB max
 
         while let Some(entry) = entries.next_entry().await? {
-            let metadata = entry.metadata().await?;
-            total_size += metadata.len();
-
-            if total_size > MAX_VAULT_SIZE {
-                bail!(
-                    "Vault copy exceeds size limit ({}MB)",
-                    MAX_VAULT_SIZE / 1024 / 1024
-                );
-            }
-
+            let src_path = entry.path();
+            let dest_path = dst.join(entry.file_name());
+            
+            // Get file type directly from directory entry
             let ty = entry.file_type().await?;
+            
+            // Security: Always avoid symlinks in vault copy to prevent traversal
             if ty.is_symlink() {
-                tracing::warn!("Skipping symlink to prevent traversal: {:?}", entry.path());
+                tracing::warn!("Skipping symlink to prevent traversal: {:?}", src_path);
                 continue;
             }
 
             if ty.is_dir() {
-                Box::pin(self.recursive_copy(&entry.path(), &dst.join(entry.file_name()))).await?;
-            } else {
-                tokio::fs::copy(entry.path(), dst.join(entry.file_name())).await?;
+                Box::pin(self.recursive_copy(&src_path, &dest_path)).await?;
+            } else if ty.is_file() {
+                // TOCTOU Fix: Open file and verify it's still a regular file before copying
+                let mut src_file = tokio::fs::File::open(&src_path).await?;
+                let metadata = src_file.metadata().await?;
+                total_size += metadata.len();
+                
+                if total_size > MAX_VAULT_SIZE {
+                    bail!("Vault copy exceeds size limit ({}MB)", MAX_VAULT_SIZE / 1024 / 1024);
+                }
+
+                if !metadata.is_file() {
+                    bail!("Security violation: File type changed during vault copy at {:?}", src_path);
+                }
+
+                let mut dest_file = tokio::fs::File::create(&dest_path).await?;
+                tokio::io::copy(&mut src_file, &mut dest_file).await?;
             }
         }
         Ok(())

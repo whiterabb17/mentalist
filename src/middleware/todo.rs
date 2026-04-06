@@ -13,9 +13,13 @@ impl TodoMiddleware {
 
     async fn read_todos(&self) -> String {
         if self.todo_path.exists() {
-            tokio::fs::read_to_string(&self.todo_path)
-                .await
-                .unwrap_or_else(|_| "Error reading TODO.md".to_string())
+            match tokio::fs::read_to_string(&self.todo_path).await {
+                Ok(content) => content,
+                Err(e) => {
+                    tracing::error!("Error reading TODO.md at {:?}: {}", self.todo_path, e);
+                    "Error reading TODO.md".to_string()
+                }
+            }
         } else {
             "No current objectives defined.".to_string()
         }
@@ -25,6 +29,10 @@ impl TodoMiddleware {
 #[async_trait]
 impl Middleware for TodoMiddleware {
     fn name(&self) -> &str { "Todo" }
+
+    fn is_critical(&self) -> bool {
+        false
+    }
 
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         // Pillar: Explicit Planning

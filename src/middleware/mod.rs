@@ -23,6 +23,12 @@ pub trait Middleware: Send + Sync {
         "Middleware"
     }
 
+    /// Whether failure of this middleware should abort the entire request chain.
+    /// Security-critical middlewares should return true (default).
+    fn is_critical(&self) -> bool {
+        true
+    }
+
     /// Returns the execution priority. Lower values run first. Default is 10.
     fn priority(&self) -> i32 {
         10
@@ -385,6 +391,10 @@ impl Middleware for LoggingMiddleware {
         "Logging"
     }
 
+    fn is_critical(&self) -> bool {
+        false
+    }
+
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         tracing::info!(
             target: "mentalist::logging_mw",
@@ -404,8 +414,20 @@ impl Middleware for LoggingMiddleware {
     }
 
     async fn before_tool_call(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
+        let mut args = tool.arguments.clone();
+        
+        // Redact potentially sensitive keys
+        if let Some(obj) = args.as_object_mut() {
+            let sensitive_keys = ["key", "token", "secret", "password", "auth", "credential", "api_key"];
+            for key in obj.keys().cloned().collect::<Vec<_>>() {
+                if sensitive_keys.iter().any(|&sk| key.to_lowercase().contains(sk)) {
+                    obj.insert(key, serde_json::Value::String("[REDACTED]".to_string()));
+                }
+            }
+        }
+
         let args_json =
-            serde_json::to_string(&tool.arguments).unwrap_or_else(|_| "INVALID_ARGS".into());
+            serde_json::to_string(&args).unwrap_or_else(|_| "INVALID_ARGS".into());
         tracing::info!(
             target: "mentalist::logging_mw",
             "Tool Call Starting | Name: {} | Args: {}",
