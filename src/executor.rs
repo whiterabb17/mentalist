@@ -194,9 +194,9 @@ pub static ENGINE: Lazy<Arc<wasmtime::Engine>> = Lazy::new(|| {
         .consume_fuel(true)
         .max_wasm_stack(1024 * 1024)
         // Hardened Windows Strategy: 
-        // Force dynamic growth to minimize initial address space reservation.
+        // Use an ultra-conservative 64MB reservation floor to prevent address space exhaustion.
         .memory_may_move(true)
-        .memory_reservation(256 * 1024 * 1024) // 256MB initial reservation floor
+        .memory_reservation(64 * 1024 * 1024) 
         .memory_guard_size(0);
     
     Arc::new(wasmtime::Engine::new(&config).expect("Failed to initialize global Wasm Engine"))
