@@ -194,10 +194,8 @@ impl SandboxedExecutor {
             ExecutionMode::Wasm {
                 module_path: Some(path),
                 ..
-            } => {
-                if !path.exists() {
-                    bail!("Wasm module not found: {:?}", path);
-                }
+            } if !path.exists() => {
+                bail!("Wasm module not found: {:?}", path);
             }
             _ => {}
         }
