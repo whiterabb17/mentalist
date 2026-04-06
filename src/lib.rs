@@ -10,6 +10,8 @@ pub mod mcp;
 pub mod skills;
 pub mod middleware;
 pub mod agent;
+pub mod config;
+pub mod error;
 pub use agent::{DeepAgent, DeepAgentState};
 
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use futures_util::stream::{BoxStream, StreamExt};
 pub struct Harness {
     pub provider: Arc<dyn ModelProvider>,
     pub middlewares: Vec<Arc<dyn middleware::Middleware>>,
+    pub config: config::MentalistConfig,
 }
 
 impl Harness {
@@ -29,7 +32,13 @@ impl Harness {
         Self {
             provider,
             middlewares: Vec::new(),
+            config: config::MentalistConfig::default(),
         }
+    }
+
+    pub fn with_config(mut self, config: config::MentalistConfig) -> Self {
+        self.config = config;
+        self
     }
 
     pub fn add_middleware(&mut self, middleware: Arc<dyn middleware::Middleware>) {
@@ -38,32 +47,40 @@ impl Harness {
     }
 
     /// Orchestrated Execution Loop following DeepAgent methodology.
-    pub async fn run(&self, mut req: Request) -> anyhow::Result<Response> {
+    #[tracing::instrument(skip(self, req), fields(prompt_len = req.prompt.len()))]
+    pub async fn run(&self, mut req: Request) -> crate::error::Result<Response> {
         // 1. Hook: before_ai_call (Context Optimization/Planning)
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
-                    tracing::error!("Critical middleware '{}' failure in before_ai_call: {}", mw_name, e);
-                    return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
+                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in before_ai_call");
+                    return Err(crate::error::MentalistError::MiddlewareError {
+                        middleware: mw_name.to_string(),
+                        source: e,
+                    });
                 } else {
-                    tracing::warn!("Non-critical middleware '{}' failure in before_ai_call: {}. Continuing.", mw_name, e);
+                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in before_ai_call. Continuing.");
                 }
             }
         }
 
         // 2. Execute AI reasoning
-        let mut res = self.provider.complete(req).await?;
+        let mut res = self.provider.complete(req).await
+            .map_err(crate::error::MentalistError::ProviderError)?;
 
         // 3. Hook: after_ai_call (Response Parsing/Intent Extraction)
         for mw in &self.middlewares {
             if let Err(e) = mw.after_ai_call(&mut res).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
-                    tracing::error!("Critical middleware '{}' failure in after_ai_call: {}", mw_name, e);
-                    return Err(e.context(format!("Middleware '{}' failure in after_ai_call", mw_name)));
+                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in after_ai_call");
+                    return Err(crate::error::MentalistError::MiddlewareError {
+                        middleware: mw_name.to_string(),
+                        source: e,
+                    });
                 } else {
-                    tracing::warn!("Non-critical middleware '{}' failure in after_ai_call: {}. Continuing.", mw_name, e);
+                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in after_ai_call. Continuing.");
                 }
             }
         }
@@ -72,22 +89,26 @@ impl Harness {
     }
 
     /// Orchestrated Streaming Loop with Post-Hook Support.
-    pub async fn run_stream(&self, mut req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
-        // 1. Hook: before_ai_call
+    #[tracing::instrument(skip(self, req), fields(prompt_len = req.prompt.len()))]
+    pub async fn run_stream(&self, mut req: Request) -> crate::error::Result<BoxStream<'static, crate::error::Result<ResponseChunk>>> {
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
-                    tracing::error!("Critical middleware '{}' failure in before_ai_call: {}", mw_name, e);
-                    return Err(e.context(format!("Middleware '{}' failure in before_ai_call", mw_name)));
+                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in before_ai_call");
+                    return Err(crate::error::MentalistError::MiddlewareError {
+                        middleware: mw_name.to_string(),
+                        source: e,
+                    });
                 } else {
-                    tracing::warn!("Non-critical middleware '{}' failure in before_ai_call: {}. Continuing.", mw_name, e);
+                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in before_ai_call. Continuing.");
                 }
             }
         }
 
         // 2. Execute AI reasoning (Streaming)
-        let inner_stream = self.provider.stream_complete(req).await?;
+        let inner_stream = self.provider.stream_complete(req).await
+            .map_err(crate::error::MentalistError::ProviderError)?;
         let middlewares = self.middlewares.clone();
 
         // Wrap stream to apply post-hooks after completion
@@ -99,7 +120,7 @@ impl Harness {
             
             futures_util::pin_mut!(inner_stream);
             while let Some(chunk_res) = inner_stream.next().await {
-                let chunk = chunk_res?;
+                let chunk = chunk_res.map_err(crate::error::MentalistError::ProviderError)?;
                 
                 // Accumulate content and tool calls for post-processing
                 if let Some(ref content) = chunk.content_delta {
@@ -122,15 +143,19 @@ impl Harness {
     }
 
     /// Helper for executed tool hooks (before).
-    pub async fn run_before_tool_hooks(&self, tool: &mut ToolCall) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self, tool), fields(tool_name = tool.name))]
+    pub async fn run_before_tool_hooks(&self, tool: &mut ToolCall) -> crate::error::Result<()> {
         for mw in &self.middlewares {
             if let Err(e) = mw.before_tool_call(tool).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
-                    tracing::error!("Critical middleware '{}' failure in before_tool_call: {}", mw_name, e);
-                    return Err(e.context(format!("Middleware '{}' failure in before_tool_call", mw_name)));
+                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in before_tool_call");
+                    return Err(crate::error::MentalistError::MiddlewareError {
+                        middleware: mw_name.to_string(),
+                        source: e,
+                    });
                 } else {
-                    tracing::warn!("Non-critical middleware '{}' failure in before_tool_call: {}. Continuing.", mw_name, e);
+                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in before_tool_call. Continuing.");
                 }
             }
         }
@@ -138,15 +163,19 @@ impl Harness {
     }
 
     /// Helper for executed tool hooks (after).
-    pub async fn run_after_tool_hooks(&self, tool: &ToolCall, result: &mut String) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self, tool, result), fields(tool_name = tool.name, result_len = result.len()))]
+    pub async fn run_after_tool_hooks(&self, tool: &ToolCall, result: &mut String) -> crate::error::Result<()> {
         for mw in &self.middlewares {
             if let Err(e) = mw.after_tool_call(tool, result).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
-                    tracing::error!("Critical middleware '{}' failure in after_tool_call: {}", mw_name, e);
-                    return Err(e.context(format!("Middleware '{}' failure in after_tool_call", mw_name)));
+                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in after_tool_call");
+                    return Err(crate::error::MentalistError::MiddlewareError {
+                        middleware: mw_name.to_string(),
+                        source: e,
+                    });
                 } else {
-                    tracing::warn!("Non-critical middleware '{}' failure in after_tool_call: {}. Continuing.", mw_name, e);
+                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in after_tool_call. Continuing.");
                 }
             }
         }
@@ -154,15 +183,19 @@ impl Harness {
     }
 
     /// Triggers manual context optimization/summarization across all middlewares.
-    pub async fn optimize_context(&self, ctx: &mut Context) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self, ctx), fields(ctx_items = ctx.items.len()))]
+    pub async fn optimize_context(&self, ctx: &mut Context) -> crate::error::Result<()> {
         for mw in &self.middlewares {
             if let Err(e) = mw.optimize_context(ctx).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
-                    tracing::error!("Critical middleware '{}' failure in optimize_context: {}", mw_name, e);
-                    return Err(e.context(format!("Middleware '{}' failure in optimize_context", mw_name)));
+                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in optimize_context");
+                    return Err(crate::error::MentalistError::MiddlewareError {
+                        middleware: mw_name.to_string(),
+                        source: e,
+                    });
                 } else {
-                    tracing::warn!("Non-critical middleware '{}' failure in optimize_context: {}. Continuing.", mw_name, e);
+                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in optimize_context. Continuing.");
                 }
             }
         }

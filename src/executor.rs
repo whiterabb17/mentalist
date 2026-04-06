@@ -25,6 +25,14 @@ pub enum ToolError {
     PermissionDenied(String),
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
+    #[error("Resource limit exceeded: {0}")]
+    ResourceLimitExceeded(String),
+    #[error("Configuration error in executor: {0}")]
+    ConfigError(String),
+    #[error("Security violation: {0}")]
+    SecurityViolation(String),
+    #[error("Containerization error: {0}")]
+    SandboxError(String),
 }
 
 fn bytes_to_string_safe(bytes: &[u8]) -> String {
@@ -54,6 +62,8 @@ pub trait ToolExecutor: Send + Sync {
 /// Optional command validator to block malicious patterns.
 pub struct CommandValidator {
     pub allowed_cmds: Vec<String>,
+    pub max_execution_time: std::time::Duration,
+    pub max_memory_mb: u64,
 }
 
 impl CommandValidator {
@@ -76,6 +86,16 @@ impl CommandValidator {
                 "find".to_string(),
                 "echo".to_string(),
             ],
+            max_execution_time: std::time::Duration::from_secs(60),
+            max_memory_mb: 512,
+        }
+    }
+
+    pub fn from_config(config: &crate::config::SecurityConfig) -> Self {
+        Self {
+            allowed_cmds: config.allowed_commands.clone(),
+            max_execution_time: std::time::Duration::from_secs(config.max_execution_time_seconds),
+            max_memory_mb: config.max_memory_mb,
         }
     }
 
@@ -88,18 +108,14 @@ impl CommandValidator {
         // 2. Validate all arguments for shell metacharacters
         for arg in args {
             if arg.contains(|c: char| ";&|`$()[]{}\"'\\".contains(c)) {
-                bail!(
-                    "Argument contains potentially dangerous shell characters: {}",
-                    arg
-                );
+                tracing::error!(arg, "Dangerous shell characters detected");
+                return Err(ToolError::SecurityViolation(format!("Dangerous characters in argument: {}", arg)).into());
             }
 
             // 3. Path expansion/traversal check
             if arg.contains("..") {
-                bail!(
-                    "Argument appears to be a path traversal attempt (..): {}",
-                    arg
-                );
+                tracing::error!(arg, "Path traversal detected");
+                return Err(ToolError::SecurityViolation(format!("Path traversal attempt: {}", arg)).into());
             }
 
             if arg.starts_with('/') {
@@ -763,10 +779,11 @@ impl MultiExecutor {
 }
 
 #[async_trait]
+
 impl ToolExecutor for MultiExecutor {
     async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
         let guard = self.executors.lock().await;
-        
+
         // 1. Explicit Routing: Try executors that definitively claim this tool
         for exec_entry in guard.iter() {
             if !exec_entry.enabled { continue; }
@@ -777,7 +794,7 @@ impl ToolExecutor for MultiExecutor {
                 }
             }
         }
-        
+
         // 2. Fallback Routing: Try any enabled executor (compatibility)
         for exec_entry in guard.iter() {
             if !exec_entry.enabled { continue; }
@@ -786,7 +803,7 @@ impl ToolExecutor for MultiExecutor {
                 Err(_) => continue,
             }
         }
-        
+
         Err(anyhow::anyhow!("Tool '{}' not found in any active executor", name))
     }
 
@@ -798,7 +815,7 @@ impl ToolExecutor for MultiExecutor {
             match exec_entry.executor.list_tools().await {
                 Ok(tools) => all_tools.extend(tools),
                 Err(e) => {
-                    tracing::warn!("Failed to list tools from executor '{}': {}", exec_entry.name, e);
+                    tracing::warn!(executor = %exec_entry.name, error = %e, "Failed to list tools from executor");
                 }
             }
         }
@@ -812,5 +829,48 @@ impl ToolExecutor for MultiExecutor {
         } else {
             "Status currently unavailable (locked)".to_string()
         }
+    }
+}
+
+/// Helper for dynamically loading executors from configuration.
+pub struct DynamicExecutorLoader;
+
+impl DynamicExecutorLoader {
+    /// Instantiates a MultiExecutor populated with executors defined in the config.
+    #[tracing::instrument(skip(config))]
+    pub async fn load_from_config(config: &crate::config::ExecutorConfig, security: &crate::config::SecurityConfig) -> Result<Arc<MultiExecutor>> {
+        let multi = Arc::new(MultiExecutor::new());
+        let validator = CommandValidator::from_config(security);
+
+        // 1. Create default based on mode
+        let default_mode = match config.default_mode.to_lowercase().as_str() {
+            "docker" => {
+                ExecutionMode::Docker {
+                    image: config.docker_image.clone().unwrap_or_else(|| "python:3.11-slim".into()),
+                    memory_limit: Some((security.max_memory_mb * 1024 * 1024) as i64),
+                    cpu_quota: Some(50000), // 50%
+                }
+            }
+            "wasm" => {
+                ExecutionMode::Wasm {
+                    module_path: config.wasm_module_path.clone(),
+                    mount_root: true,
+                    env_vars: HashMap::new(),
+                }
+            }
+            _ => ExecutionMode::Local,
+        };
+
+        let executor = SandboxedExecutor {
+            mode: default_mode,
+            root_dir: config.sandbox_root.clone(),
+            vault_dir: config.vault_dir.clone(),
+            validator,
+            middlewares: Vec::new(),
+        };
+
+        multi.add_executor("default".to_string(), Arc::new(executor)).await;
+        
+        Ok(multi)
     }
 }

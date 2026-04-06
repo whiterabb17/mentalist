@@ -34,6 +34,16 @@ pub trait Middleware: Send + Sync {
         10
     }
 
+    /// Called when the Harness is initialized or when the middleware is added.
+    async fn initialize(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Called when the Harness or Agent is being shut down.
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Fires before the prompt reaches the LLM.
     async fn before_ai_call(&self, _req: &mut Request) -> anyhow::Result<()> {
         Ok(())

@@ -1,4 +1,4 @@
-use crate::{Harness, Request, executor::ToolExecutor};
+use crate::{Harness, Request, executor::ToolExecutor, config::AgentConfig, error::Result as MentalistResult, error::MentalistError};
 use mem_core::{Context, FileStorage, ToolCall};
 use mem_resilience::ResilientMemoryController;
 use mem_dreamer::DreamScheduler;
@@ -19,27 +19,7 @@ pub struct DeepAgentState {
     pub sandbox_root: PathBuf,
 }
 
-pub struct StepConfig {
-    pub max_turns: usize,
-    pub timeout_seconds: u64,
-    pub fail_on_limit: bool,
-    pub max_retries: usize,
-    pub max_context_items: usize,
-    pub max_tool_calls_per_turn: usize,
-}
-
-impl Default for StepConfig {
-    fn default() -> Self {
-        Self {
-            max_turns: 10,
-            timeout_seconds: 300,
-            fail_on_limit: false,
-            max_retries: 3,
-            max_context_items: 50,
-            max_tool_calls_per_turn: 20,
-        }
-    }
-}
+// Removed redundant StepConfig as it is now part of crate::config::AgentConfig
 
 /// The DeepAgent orchestrates the Model, Harness, and Executor into a single stateful entity.
 ///
@@ -102,31 +82,36 @@ impl DeepAgent {
     }
 
     /// Executes a single reasoning/action step following the DeepAgent loop.
-    pub async fn step(&mut self, user_input: String) -> anyhow::Result<String> {
+    #[tracing::instrument(skip(self, user_input), fields(session_id = %self.state.session_id, input_len = user_input.len()))]
+    pub async fn step(&mut self, user_input: String) -> MentalistResult<String> {
         if let Some(s) = &self.scheduler {
             s.record_activity();
         }
         
         let mut full_content = String::new();
-        let mut stream = Box::pin(self.step_stream(user_input, StepConfig::default()));
+        // Use agent config from harness
+        let agent_config = self.harness.config.agent.clone();
+        let mut stream = Box::pin(self.step_stream(user_input, agent_config));
         
         while let Some(res) = stream.next().await {
-            if let AgentStepEvent::TextChunk(c) = res? {
-                full_content.push_str(&c)
+            match res? {
+                AgentStepEvent::TextChunk(c) => full_content.push_str(&c),
+                _ => {}
             }
         }
         Ok(full_content)
     }
 
     /// Autonomous reasoning loop that executes tools and continues until a final answer is reached.
+    #[tracing::instrument(skip(self, user_input, config), fields(session_id = %self.state.session_id))]
     pub fn step_stream(
         &mut self, 
         user_input: String,
-        config: StepConfig,
-    ) -> BoxStream<'_, anyhow::Result<AgentStepEvent>> {
+        config: AgentConfig,
+    ) -> BoxStream<'_, MentalistResult<AgentStepEvent>> {
         let stream = async_stream::try_stream! {
             // Explicitly state the chunk type to help inference
-            if false { yield anyhow::Ok(AgentStepEvent::Status("".into()))?; }
+            if false { yield MentalistResult::Ok(AgentStepEvent::Status("".into()))?; }
             
             let start_time = std::time::Instant::now();
 
@@ -160,7 +145,7 @@ impl DeepAgent {
                     let msg = format!("Turn limit ({}) reached. Stopping.", config.max_turns);
                     yield AgentStepEvent::Status(msg.clone());
                     if config.fail_on_limit {
-                        Err(anyhow::anyhow!(msg))?;
+                        Err(MentalistError::AgentError(msg))?;
                     }
                     break;
                 }
@@ -169,7 +154,7 @@ impl DeepAgent {
 
                 // Check timeout
                 if start_time.elapsed().as_secs() > config.timeout_seconds {
-                    Err(anyhow::anyhow!("Agent step timeout after {}s", config.timeout_seconds))?;
+                    Err(MentalistError::AgentError(format!("Agent step timeout after {}s", config.timeout_seconds)))?;
                 }
 
                 // Fetch tools from the executor
@@ -209,8 +194,8 @@ impl DeepAgent {
                         let fixed_args = Self::fix_json(&current_tool_args);
                         let arguments: serde_json::Value = serde_json::from_str(&fixed_args)
                             .map_err(|e| {
-                                tracing::error!("Failed to parse tool arguments: {}. Raw: {}. Fixed: {}", e, current_tool_args, fixed_args);
-                                anyhow::anyhow!("Tool argument JSON parse error: {} for args: {}", e, fixed_args)
+                                tracing::error!(error = %e, raw = %current_tool_args, fixed = %fixed_args, "Failed to parse tool arguments");
+                                MentalistError::AgentError(format!("Tool argument JSON parse error: {} for args: {}", e, fixed_args))
                             })?;
                         tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
                         current_tool_args.clear();
@@ -251,13 +236,16 @@ impl DeepAgent {
                             Err(e) => {
                                 let err_msg = format!("Tool error: {}", e);
                                 
-                                // Categorize error for smarter retry logic using structured variants if available
+                                // Categorize error using structured variants
                                 let error_category = if let Some(te) = e.downcast_ref::<crate::executor::ToolError>() {
                                     match te {
                                         crate::executor::ToolError::Transient(_) => "transient_timeout",
                                         crate::executor::ToolError::NotFound(_) => "tool_not_found",
                                         crate::executor::ToolError::PermissionDenied(_) => "permission_denied",
                                         crate::executor::ToolError::ExecutionFailed(_) => "execution_failed",
+                                        crate::executor::ToolError::ResourceLimitExceeded(_) => "resource_limit",
+                                        crate::executor::ToolError::SecurityViolation(_) => "security_violation",
+                                        _ => "internal_error",
                                     }
                                 } else {
                                     let error_text = e.to_string().to_lowercase();
@@ -321,26 +309,29 @@ impl DeepAgent {
     }
 
     /// Persists agent state atomically using temp files.
-    pub async fn save_state_resilient(&mut self) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self), fields(session_id = %self.state.session_id))]
+    pub async fn save_state_resilient(&mut self) -> MentalistResult<()> {
         let _guard = self.save_mutex.lock().await;
+        // Use a hidden directory for internal state if possible, but keep .agent for backwards compatibility
         let root = PathBuf::from(".agent/sessions");
         
         // Atomic directory creation
-        let _ = tokio::fs::create_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.map_err(|e| MentalistError::Internal(format!("Failed to create session dir: {}", e)))?;
         
         let path = root.join(format!("session_{}.session", self.state.session_id));
         
         let mut optimized_context = (*self.state.context).clone();
-        self.memory_controller.optimize_resilient(&mut optimized_context).await?;
+        self.memory_controller.optimize_resilient(&mut optimized_context).await
+            .map_err(|e| MentalistError::Internal(format!("Context optimization failed: {}", e)))?;
         
         let optimized_arc = Arc::new(optimized_context);
         self.state.context = optimized_arc.clone();
         
         // Atomic write: write to temp file, then rename
-        let data = serde_json::to_vec_pretty(&self.state)?;
+        let data = serde_json::to_vec_pretty(&self.state).map_err(|e| MentalistError::Internal(format!("Serialization error: {}", e)))?;
         let temp_file = root.join(format!(".session_{}.tmp", self.state.session_id));
-        tokio::fs::write(&temp_file, data).await?;
-        tokio::fs::rename(&temp_file, path).await?;
+        tokio::fs::write(&temp_file, data).await.map_err(|e| MentalistError::Internal(format!("Write error: {}", e)))?;
+        tokio::fs::rename(&temp_file, path).await.map_err(|e| MentalistError::Internal(format!("Rename error: {}", e)))?;
         
         Ok(())
     }

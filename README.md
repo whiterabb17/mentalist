@@ -6,9 +6,9 @@ The **Mentalist** is a high-performance, production-grade execution environment 
 
 ### 1. Hardened & Secure Execution Lifecycle
 The harness provides a strict Interceptor pattern integrated with the resilient MindPalace pipeline. Every turn is protected by:
-- **`CommandValidator`**: Multi-layer security including command whitelisting, shell injection protection (regex-based sanitization), and strict path traversal guards.
+- **`CommandValidator`**: Multi-layer security including command whitelisting, shell injection protection, and strict path traversal guards, now with runtime execution limits.
 - **`is_critical` Policy**: Enhanced middleware safety where non-critical failures (like logging or planning) do not abort the core agent reasoning loop.
-- **Structured Error Handling**: Categorized tool errors (Transient, Permission Denied, Tool Not Found) with exponential backoff retry logic.
+- **Structured Error Handling**: Categorized tool errors (Transient, Permission Denied, Tool Not Found, Security Violation) with exponential backoff retry logic, wrapped in a unified `MentalistError` framework.
 
 ### 2. Resilience & Stability Pillar
 The **DeepAgent** handles all state lifecycle through the **ResilientMemoryController**.
@@ -30,7 +30,7 @@ Includes a `SandboxedExecutor` for high-security tool execution:
 Exposes a flexible executor architecture:
 - **MCP (Model Context Protocol)**: Direct integration with domestic and remote MCP servers via the `McpExecutor`. Supports standard-compliant `initialize` handshakes and JSON-RPC.
 - **Skills System**: A filesystem-based tool discovery system with validated script execution (Python, JS, Shell).
-- **MultiExecutor**: Advanced tool routing with registration collision detection and first-match priority.
+- **MultiExecutor & Dynamic Loading**: Advanced tool routing with registration collision detection. The `DynamicExecutorLoader` enables seamless instantiation from a unified `MentalistConfig`.
 - **Sensitive Data Redaction**: Automatic masking of `api_key`, `token`, and `secret` values in diagnostic logs.
 
 ## 🛠️ Usage Example (v1.0.0)
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         None
     )?);
     
-    let config = StepConfig {
+    let config = AgentConfig {
         max_turns: 15,
         max_tool_calls_per_turn: 10,
         ..Default::default()
@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         state, 
         executor, 
         controller,
-        Some(config)
+        None, // scheduler
     );
     
     // 4. Integrated Step with Resilience & Planning

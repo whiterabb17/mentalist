@@ -1,7 +1,9 @@
-use crate::executor::{ToolExecutor, CommandValidator};
+use crate::executor::{ToolExecutor, CommandValidator, ToolError};
+use crate::error::{Result as MentalistResult, MentalistError};
+use crate::config::SecurityConfig;
 use mem_core::ToolDefinition;
 use async_trait::async_trait;
-use anyhow::{Result, Context, anyhow};
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -28,20 +30,23 @@ pub struct SkillExecutor {
     pub skills_root: PathBuf,
     pub skills: HashMap<String, Arc<Skill>>,
     pub validator: CommandValidator,
+    pub security: SecurityConfig,
 }
 
 impl SkillExecutor {
-    pub async fn new(root: PathBuf) -> Result<Self> {
+    pub async fn new(root: PathBuf, security: SecurityConfig) -> MentalistResult<Self> {
         let mut executor = Self {
             skills_root: root,
             skills: HashMap::new(),
-            validator: CommandValidator::new_default(),
+            validator: CommandValidator::from_config(&security),
+            security,
         };
         executor.reload().await?;
         Ok(executor)
     }
 
-    pub async fn reload(&mut self) -> Result<()> {
+    #[tracing::instrument(skip(self))]
+    pub async fn reload(&mut self) -> MentalistResult<()> {
         if !self.skills_root.exists() {
             return Ok(());
         }
@@ -68,31 +73,31 @@ impl SkillExecutor {
         Ok(())
     }
 
-    async fn load_skill(&self, path: &Path) -> Result<Skill> {
+    async fn load_skill(&self, path: &Path) -> MentalistResult<Skill> {
         let content = fs::read_to_string(path.join("SKILL.md")).await?;
         
         let (frontmatter, instructions) = if content.starts_with("---") {
             let parts: Vec<&str> = content.splitn(3, "---").collect();
             match parts.len() {
                 3 => (parts[1], parts[2].trim()),
-                _ => anyhow::bail!("Invalid SKILL.md frontmatter separator"),
+                _ => return Err(MentalistError::ConfigError("Invalid SKILL.md frontmatter separator".into())),
             }
         } else {
-            anyhow::bail!("SKILL.md must start with --- for frontmatter");
+            return Err(MentalistError::ConfigError("SKILL.md must start with --- for frontmatter".into()));
         };
 
         if frontmatter.trim().is_empty() {
-            anyhow::bail!("Empty frontmatter in SKILL.md");
+            return Err(MentalistError::ConfigError("Empty frontmatter in SKILL.md".into()));
         }
 
         let metadata: SkillMetadata = serde_yaml::from_str(frontmatter)
             .context("Failed to parse SKILL.md frontmatter")?;
 
         if metadata.name.is_empty() {
-            anyhow::bail!("Skill name is required");
+            return Err(MentalistError::ConfigError("Skill name is required".into()));
         }
         if metadata.description.is_empty() {
-            anyhow::bail!("Skill description is required");
+            return Err(MentalistError::ConfigError("Skill description is required".into()));
         }
 
         Ok(Skill {
@@ -105,7 +110,8 @@ impl SkillExecutor {
 
 #[async_trait]
 impl ToolExecutor for SkillExecutor {
-    async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
+    #[tracing::instrument(skip(self, args), fields(skill_name = name))]
+    async fn execute(&self, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
         // Validate skill name
         if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
             anyhow::bail!("Invalid skill name: {} (only alphanumeric, _, - allowed)", name);
@@ -173,9 +179,10 @@ impl ToolExecutor for SkillExecutor {
             cmd.arg(args_str);
             cmd.current_dir(&canonical_skill_path);
             
-            let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output())
+            let timeout = std::time::Duration::from_secs(self.security.max_execution_time_seconds);
+            let output = tokio::time::timeout(timeout, cmd.output())
                 .await
-                .map_err(|_| anyhow!("Skill script execution timed out after 30s"))??;
+                .map_err(|_| ToolError::Transient(format!("Skill script execution timed out after {}s", timeout.as_secs())))??;
 
             if !output.status.success() {
                 return Err(anyhow!("Skill script failed: {}", String::from_utf8_lossy(&output.stderr)));
@@ -190,7 +197,7 @@ impl ToolExecutor for SkillExecutor {
         );
     }
 
-    async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
+    async fn list_tools(&self) -> anyhow::Result<Vec<ToolDefinition>> {
         let mut definitions = Vec::new();
         for skill in self.skills.values() {
             definitions.push(ToolDefinition {
