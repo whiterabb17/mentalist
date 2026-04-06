@@ -32,9 +32,6 @@ jobs:
       
       - name: Docs
         run: cargo doc --all-features --no-deps
-      
-      - name: Audit
-        run: cargo audit
 
   security:
     runs-on: ubuntu-latest
