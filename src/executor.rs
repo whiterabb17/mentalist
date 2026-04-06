@@ -1,23 +1,31 @@
 use anyhow::{bail, Result};
+use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody as Config, HostConfig};
 use bollard::query_parameters::{CreateImageOptions, LogsOptions, RemoveContainerOptions};
 use bollard::Docker;
 use futures_util::stream::StreamExt;
+use mem_core::ToolDefinition;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::HashMap;
 use std::sync::Arc;
-use mem_core::ToolDefinition;
-use async_trait::async_trait;
+use tokio::sync::Mutex;
+use crate::middleware::Middleware;
+use crate::ToolCall;
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     /// Executes a tool by name with specified JSON arguments.
     async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String>;
-    
+
     /// Lists all tools currently supported by this executor.
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>>;
+
+    /// Returns the current operational status of the executor.
+    fn status(&self) -> String {
+        "Ready".to_string()
+    }
 }
 
 /// Optional command validator to block malicious patterns.
@@ -29,11 +37,21 @@ impl CommandValidator {
     pub fn new_default() -> Self {
         Self {
             allowed_cmds: vec![
-                "python".to_string(), "node".to_string(), "ruby".to_string(), 
-                "bash".to_string(), "sh".to_string(), "cat".to_string(), 
-                "ls".to_string(), "grep".to_string(), "jq".to_string(), 
-                "curl".to_string(), "wget".to_string(), "tar".to_string(), 
-                "zip".to_string(), "find".to_string(), "echo".to_string()
+                "python".to_string(),
+                "node".to_string(),
+                "ruby".to_string(),
+                "bash".to_string(),
+                "sh".to_string(),
+                "cat".to_string(),
+                "ls".to_string(),
+                "grep".to_string(),
+                "jq".to_string(),
+                "curl".to_string(),
+                "wget".to_string(),
+                "tar".to_string(),
+                "zip".to_string(),
+                "find".to_string(),
+                "echo".to_string(),
             ],
         }
     }
@@ -47,24 +65,37 @@ impl CommandValidator {
         // 2. Validate all arguments for shell metacharacters
         for arg in args {
             if arg.contains(|c: char| ";&|`$()[]{}\"'\\".contains(c)) {
-                bail!("Argument contains potentially dangerous shell characters: {}", arg);
+                bail!(
+                    "Argument contains potentially dangerous shell characters: {}",
+                    arg
+                );
             }
-            
+
             // 3. Path expansion/traversal check
             if arg.contains("..") {
-                bail!("Argument appears to be a path traversal attempt (..): {}", arg);
+                bail!(
+                    "Argument appears to be a path traversal attempt (..): {}",
+                    arg
+                );
             }
 
             if arg.starts_with('/') {
                 let path = Path::new(arg);
                 // Allow absolute paths ONLY if they are children of root_dir
                 if !path.starts_with(root_dir) {
-                    bail!("Access Denied: Absolute path '{}' is outside the sandbox root '{:?}'", arg, root_dir);
+                    bail!(
+                        "Access Denied: Absolute path '{}' is outside the sandbox root '{:?}'",
+                        arg,
+                        root_dir
+                    );
                 }
             }
 
             if arg.starts_with('~') {
-                 bail!("Access Denied: Home directory expansion (~) is not allowed in sandbox: {}", arg);
+                bail!(
+                    "Access Denied: Home directory expansion (~) is not allowed in sandbox: {}",
+                    arg
+                );
             }
         }
 
@@ -78,10 +109,10 @@ pub enum ExecutionMode {
     /// Tools are executed as local processes. Recommended for trusted environments only.
     Local,
     /// Tools are executed inside a Docker container. Provides host OS isolation.
-    Docker { 
+    Docker {
         image: String,
         memory_limit: Option<i64>, // bytes
-        cpu_quota: Option<i64>, // percentage * 1000
+        cpu_quota: Option<i64>,    // percentage * 1000
     },
     /// Tools are executed as Wasm modules using `wasmtime`. Provides the highest level of isolation.
     Wasm {
@@ -109,6 +140,7 @@ pub struct SandboxedExecutor {
     pub vault_dir: Option<PathBuf>,
     /// The validator used to check commands and arguments for safety.
     pub validator: CommandValidator,
+    pub middlewares: Vec<Arc<dyn Middleware>>,
 }
 
 impl SandboxedExecutor {
@@ -135,60 +167,119 @@ impl SandboxedExecutor {
                 if let Err(e) = std::process::Command::new("docker").arg("version").output() {
                     tracing::warn!("Docker daemon validation warning: {}", e);
                 }
-            },
-            ExecutionMode::Wasm { module_path: Some(path), .. } => {
+            }
+            ExecutionMode::Wasm {
+                module_path: Some(path),
+                ..
+            } => {
                 if !path.exists() {
                     bail!("Wasm module not found: {:?}", path);
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
-        Ok(Self { 
-            mode, 
-            root_dir, 
+        Ok(Self {
+            mode,
+            root_dir,
             vault_dir,
             validator: CommandValidator::new_default(),
+            middlewares: Vec::new(),
         })
+    }
+
+    pub fn add_middleware(&mut self, middleware: Arc<dyn Middleware>) {
+        self.middlewares.push(middleware);
+        self.middlewares.sort_by_key(|mw| mw.priority());
+    }
+
+    pub fn with_middleware(mut self, middleware: Arc<dyn Middleware>) -> Self {
+        self.add_middleware(middleware);
+        self
     }
 }
 
 #[async_trait]
 impl ToolExecutor for SandboxedExecutor {
     async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
-        let args_vec: Vec<String> = if let Some(obj) = args.as_object() {
-            obj.values().map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Null => String::new(),
-                other => serde_json::to_string(other).unwrap_or_default(),
-            }).collect()
-        } else if let Some(arr) = args.as_array() {
-            arr.iter().map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other).unwrap_or_default(),
-            }).collect()
+        let mut tool_call = ToolCall {
+            name: name.to_string(),
+            arguments: args.clone(),
+        };
+
+        // Run before_tool_call hooks (Safety Gates)
+        for mw in &self.middlewares {
+            mw.before_tool_call(&mut tool_call).await?;
+        }
+
+        let args_vec: Vec<String> = if let Some(obj) = tool_call.arguments.as_object() {
+            obj.values()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => String::new(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                })
+                .collect()
+        } else if let Some(arr) = tool_call.arguments.as_array() {
+            arr.iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                })
+                .collect()
         } else {
             vec![]
         };
 
-        self.validator.validate(name, &args_vec, &self.root_dir)?;
+        self.validator.validate(&tool_call.name, &args_vec, &self.root_dir)?;
 
         // If vault is set, we use it as the working directory / mount point for writes
         let working_dir = self.vault_dir.as_ref().unwrap_or(&self.root_dir);
 
-        match &self.mode {
-            ExecutionMode::Local => self.execute_local(name, args_vec, working_dir),
-            ExecutionMode::Docker { image, memory_limit, cpu_quota } => {
-                self.execute_docker(image, name, args_vec, working_dir, *memory_limit, *cpu_quota).await
-            },
-            ExecutionMode::Wasm { module_path, mount_root, env_vars } => {
-                let mut wasm_args = vec!["tool_runtime".to_string(), name.to_string()];
+        let output = match &self.mode {
+            ExecutionMode::Local => self.execute_local(&tool_call.name, args_vec, working_dir),
+            ExecutionMode::Docker {
+                image,
+                memory_limit,
+                cpu_quota,
+            } => {
+                self.execute_docker(
+                    image,
+                    &tool_call.name,
+                    args_vec,
+                    working_dir,
+                    *memory_limit,
+                    *cpu_quota,
+                )
+                .await
+            }
+            ExecutionMode::Wasm {
+                module_path,
+                mount_root,
+                env_vars,
+            } => {
+                let mut wasm_args = vec!["tool_runtime".to_string(), tool_call.name.clone()];
                 wasm_args.extend(args_vec);
-                self.execute_wasm(module_path.as_ref(), *mount_root, wasm_args, working_dir, env_vars).await
-            },
+                self.execute_wasm(
+                    module_path.as_ref(),
+                    *mount_root,
+                    wasm_args,
+                    working_dir,
+                    env_vars,
+                )
+                .await
+            }
+        };
+
+        // Run after_tool_call hooks
+        let mut final_output = output?;
+        for mw in &self.middlewares {
+            mw.after_tool_call(&tool_call, &mut final_output).await?;
         }
+
+        Ok(final_output)
     }
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
@@ -227,13 +318,16 @@ impl ToolExecutor for SandboxedExecutor {
         }
         Ok(tools)
     }
+
+    fn status(&self) -> String {
+        format!("Active (Sandbox: {:?})", self.mode)
+    }
 }
 
 impl SandboxedExecutor {
-
     fn execute_local(&self, cmd: &str, args: Vec<String>, working_dir: &Path) -> Result<String> {
         let mut commands_to_try = vec![cmd.to_string()];
-        
+
         // Add common fallbacks for portability
         match cmd {
             "python" => commands_to_try.push("python3".to_string()),
@@ -246,7 +340,14 @@ impl SandboxedExecutor {
 
         // Essential environment variables for tool initialization (e.g., Python on Windows)
         let mut safe_env = HashMap::new();
-        let essential_vars = ["PATH", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE"];
+        let essential_vars = [
+            "PATH",
+            "SYSTEMROOT",
+            "SYSTEMDRIVE",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+        ];
         for var in essential_vars {
             if let Ok(val) = std::env::var(var) {
                 safe_env.insert(var.to_string(), val);
@@ -275,12 +376,20 @@ impl SandboxedExecutor {
                     continue; // Try next fallback
                 }
                 Err(e) => {
-                    bail!("Local tool execution critical failure ({}): {}", attempt_cmd, e);
+                    bail!(
+                        "Local tool execution critical failure ({}): {}",
+                        attempt_cmd,
+                        e
+                    );
                 }
             }
         }
 
-        Err(anyhow::anyhow!("Local tool execution failed: program not found (last tried: {}). Original error: {:?}", cmd, last_error))
+        Err(anyhow::anyhow!(
+            "Local tool execution failed: program not found (last tried: {}). Original error: {:?}",
+            cmd,
+            last_error
+        ))
     }
 
     async fn execute_wasm(
@@ -298,19 +407,24 @@ impl SandboxedExecutor {
 
         // 1. Engine Hardening: 4GB memory, Fuel enabled
         let mut config = wasmtime::Config::new();
-        config.async_support(true)
-             .consume_fuel(true)
-             .max_wasm_stack(1024 * 1024); // 1MB stack
+        config
+            .async_support(true)
+            .consume_fuel(true)
+            .max_wasm_stack(1024 * 1024); // 1MB stack
 
         let engine = Engine::new(&config)?;
-        
+
         let module = if let Some(path) = module_path {
             Module::from_file(&engine, path)?
         } else {
             #[cfg(feature = "wasm-tools")]
-            { Module::from_binary(&engine, DEFAULT_WASM)? }
+            {
+                Module::from_binary(&engine, DEFAULT_WASM)?
+            }
             #[cfg(not(feature = "wasm-tools"))]
-            { bail!("No Wasm module provided and wasm-tools feature is disabled"); }
+            {
+                bail!("No Wasm module provided and wasm-tools feature is disabled");
+            }
         };
 
         let mut linker: Linker<State> = Linker::new(&engine);
@@ -320,8 +434,11 @@ impl SandboxedExecutor {
         let stderr = stdout.clone();
 
         let mut builder = WasiCtxBuilder::new();
-        builder.stdout(stdout.clone()).stderr(stderr.clone()).args(&args);
-        
+        builder
+            .stdout(stdout.clone())
+            .stderr(stderr.clone())
+            .args(&args);
+
         // Pass explicit env vars ONLY
         for (k, v) in env_vars {
             builder.env(k, v);
@@ -333,21 +450,37 @@ impl SandboxedExecutor {
         }
 
         let wasi = builder.build_p1();
-        
+
         // 2. Resource Limiting
         struct Limits {
             max_memory: usize,
         }
         impl ResourceLimiter for Limits {
-            fn memory_growing(&mut self, _current: usize, desired: usize, _maximum: Option<usize>) -> Result<bool> {
+            fn memory_growing(
+                &mut self,
+                _current: usize,
+                desired: usize,
+                _maximum: Option<usize>,
+            ) -> Result<bool> {
                 Ok(desired <= self.max_memory)
             }
-            fn table_growing(&mut self, _current: usize, desired: usize, _maximum: Option<usize>) -> Result<bool> {
+            fn table_growing(
+                &mut self,
+                _current: usize,
+                desired: usize,
+                _maximum: Option<usize>,
+            ) -> Result<bool> {
                 Ok(desired <= 1000)
             }
-            fn instances(&self) -> usize { 1 }
-            fn tables(&self) -> usize { 1 }
-            fn memories(&self) -> usize { 1 }
+            fn instances(&self) -> usize {
+                1
+            }
+            fn tables(&self) -> usize {
+                1
+            }
+            fn memories(&self) -> usize {
+                1
+            }
         }
 
         struct State {
@@ -355,10 +488,15 @@ impl SandboxedExecutor {
             limits: Limits,
         }
 
-        let mut store = Store::new(&engine, State { 
-            wasi, 
-            limits: Limits { max_memory: 4 * 1024 * 1024 * 1024 } // 4GB 
-        });
+        let mut store = Store::new(
+            &engine,
+            State {
+                wasi,
+                limits: Limits {
+                    max_memory: 4 * 1024 * 1024 * 1024,
+                }, // 4GB
+            },
+        );
         store.set_fuel(50_000_000)?; // 50M instructions
         store.limiter(|s| &mut s.limits);
 
@@ -378,11 +516,28 @@ impl SandboxedExecutor {
         Ok(String::from_utf8_lossy(&stdout.contents()).to_string())
     }
 
-    async fn execute_docker(&self, image: &str, cmd: &str, args: Vec<String>, working_dir: &Path, memory_limit: Option<i64>, cpu_quota: Option<i64>) -> Result<String> {
+    async fn execute_docker(
+        &self,
+        image: &str,
+        cmd: &str,
+        args: Vec<String>,
+        working_dir: &Path,
+        memory_limit: Option<i64>,
+        cpu_quota: Option<i64>,
+    ) -> Result<String> {
         let docker = Docker::connect_with_local_defaults()?;
-        
-        let mut pull_stream = docker.create_image(Some(CreateImageOptions { from_image: Some(image.to_string()), ..Default::default() }), None, None);
-        while let Some(res) = pull_stream.next().await { res?; }
+
+        let mut pull_stream = docker.create_image(
+            Some(CreateImageOptions {
+                from_image: Some(image.to_string()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(res) = pull_stream.next().await {
+            res?;
+        }
 
         let abs_root = working_dir.canonicalize()?.to_string_lossy().to_string();
         let binds = vec![format!("{}:/sandbox:rw", abs_root)];
@@ -390,7 +545,7 @@ impl SandboxedExecutor {
         let host_config = HostConfig {
             binds: Some(binds),
             memory: memory_limit.or(Some(4 * 1024 * 1024 * 1024)), // Default 4GB
-            cpu_quota: cpu_quota.or(Some(50000)), // Default 50%
+            cpu_quota: cpu_quota.or(Some(50000)),                  // Default 50%
             ..Default::default()
         };
 
@@ -408,10 +563,18 @@ impl SandboxedExecutor {
         };
 
         let container = docker.create_container(None, config).await?;
-        
+
         let result = async {
             docker.start_container(&container.id, None).await?;
-            let mut logs = docker.logs(&container.id, Some(LogsOptions { stdout: true, stderr: true, follow: true, ..Default::default() }));
+            let mut logs = docker.logs(
+                &container.id,
+                Some(LogsOptions {
+                    stdout: true,
+                    stderr: true,
+                    follow: true,
+                    ..Default::default()
+                }),
+            );
 
             let mut output = String::new();
             while let Some(log_result) = logs.next().await {
@@ -420,21 +583,24 @@ impl SandboxedExecutor {
                 }
             }
             Ok::<String, anyhow::Error>(output)
-        }.await;
+        }
+        .await;
 
         // Ensure cleanup
         match docker.remove_container(&container.id, None).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 tracing::error!("Failed to clean up container {}: {}", container.id, e);
                 // Attempt force removal
-                let _ = docker.remove_container(
-                    &container.id, 
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    })
-                ).await;
+                let _ = docker
+                    .remove_container(
+                        &container.id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
             }
         }
 
@@ -448,7 +614,7 @@ impl SandboxedExecutor {
                 // Validate vault is within project boundaries
                 let vault_canonical = vault.canonicalize()?;
                 let root_canonical = self.root_dir.canonicalize()?;
-                
+
                 if !vault_canonical.starts_with(&root_canonical) {
                     bail!(
                         "Security breach attempt: Vault directory {:?} is outside project root {:?}",
@@ -458,7 +624,7 @@ impl SandboxedExecutor {
                 }
 
                 self.recursive_copy(vault, &self.root_dir).await?;
-                
+
                 // Secure cleanup with verification
                 tokio::fs::remove_dir_all(vault).await?;
                 tokio::fs::create_dir_all(vault).await?;
@@ -471,15 +637,18 @@ impl SandboxedExecutor {
         let mut entries = tokio::fs::read_dir(src).await?;
         let mut total_size = 0u64;
         const MAX_VAULT_SIZE: u64 = 1024 * 1024 * 100; // 100MB max
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let metadata = entry.metadata().await?;
             total_size += metadata.len();
-            
+
             if total_size > MAX_VAULT_SIZE {
-                bail!("Vault copy exceeds size limit ({}MB)", MAX_VAULT_SIZE / 1024 / 1024);
+                bail!(
+                    "Vault copy exceeds size limit ({}MB)",
+                    MAX_VAULT_SIZE / 1024 / 1024
+                );
             }
-            
+
             let ty = entry.file_type().await?;
             if ty.is_symlink() {
                 tracing::warn!("Skipping symlink to prevent traversal: {:?}", entry.path());
@@ -496,10 +665,22 @@ impl SandboxedExecutor {
     }
 }
 
+/// An entry in the MultiExecutor tracking its lifecycle state.
+pub struct NamedExecutor {
+    pub name: String,
+    pub executor: Arc<dyn ToolExecutor>,
+    pub enabled: bool,
+}
+
 /// Orchestrates multiple ToolExecutors.
-#[derive(Default)]
 pub struct MultiExecutor {
-    pub executors: Vec<Arc<dyn ToolExecutor>>,
+    pub executors: Mutex<Vec<NamedExecutor>>,
+}
+
+impl Default for MultiExecutor {
+    fn default() -> Self {
+        Self { executors: Mutex::new(Vec::new()) }
+    }
 }
 
 impl MultiExecutor {
@@ -507,8 +688,30 @@ impl MultiExecutor {
         Self::default()
     }
 
-    pub fn add_executor(&mut self, executor: Arc<dyn ToolExecutor>) {
-        self.executors.push(executor);
+    pub async fn add_executor(&self, name: String, executor: Arc<dyn ToolExecutor>) {
+        let mut guard = self.executors.lock().await;
+        guard.push(NamedExecutor {
+            name,
+            executor,
+            enabled: true,
+        });
+    }
+
+    pub async fn set_executor_enabled(&self, name: &str, enabled: bool) -> bool {
+        let mut guard = self.executors.lock().await;
+        if let Some(exec) = guard.iter_mut().find(|e| e.name == name) {
+            exec.enabled = enabled;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn list_executors(&self) -> Vec<(String, bool, String)> {
+        let guard = self.executors.lock().await;
+        guard.iter()
+            .map(|e| (e.name.clone(), e.enabled, e.executor.status()))
+            .collect()
     }
 }
 
@@ -517,33 +720,47 @@ impl ToolExecutor for MultiExecutor {
     async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
         let mut last_err = anyhow::anyhow!("No executor found for tool: {}", name);
         
-        for exec in &self.executors {
-            let tools = exec.list_tools().await?;
+        let guard = self.executors.lock().await;
+        for exec_entry in &*guard {
+            if !exec_entry.enabled { continue; }
+            let tools = exec_entry.executor.list_tools().await?;
             if tools.iter().any(|t| t.name == name) {
-                return exec.execute(name, args).await;
+                return exec_entry.executor.execute(name, args).await;
             }
         }
         
-        for exec in &self.executors {
-            match exec.execute(name, args.clone()).await {
+        for exec_entry in &*guard {
+            if !exec_entry.enabled { continue; }
+            match exec_entry.executor.execute(name, args.clone()).await {
                 Ok(res) => return Ok(res),
                 Err(e) => last_err = e,
             }
         }
-
+        
         Err(last_err)
     }
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
         let mut all_tools = Vec::new();
-        for exec in &self.executors {
-            match exec.list_tools().await {
+        let guard = self.executors.lock().await;
+        for exec_entry in &*guard {
+            if !exec_entry.enabled { continue; }
+            match exec_entry.executor.list_tools().await {
                 Ok(tools) => all_tools.extend(tools),
                 Err(e) => {
-                    tracing::warn!("Failed to list tools from an executor: {}", e);
+                    tracing::warn!("Failed to list tools from executor '{}': {}", exec_entry.name, e);
                 }
             }
         }
         Ok(all_tools)
+    }
+
+    fn status(&self) -> String {
+        if let Ok(guard) = self.executors.try_lock() {
+            let enabled_count = guard.iter().filter(|e| e.enabled).count();
+            format!("{} executors active", enabled_count)
+        } else {
+            "Status currently unavailable (locked)".to_string()
+        }
     }
 }

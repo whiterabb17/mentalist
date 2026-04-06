@@ -274,19 +274,22 @@ impl DeepAgent {
     }
 
     /// Persists agent state atomically using temp files.
-    pub async fn save_state_resilient(&self) -> anyhow::Result<()> {
+    pub async fn save_state_resilient(&mut self) -> anyhow::Result<()> {
         let root = PathBuf::from(".agent/sessions");
         
         // Atomic directory creation
         let _ = tokio::fs::create_dir_all(&root).await;
         
         let path = root.join(format!("session_{}.session", self.state.session_id));
-        let data = serde_json::to_vec_pretty(&self.state)?;
         
         let mut optimized_context = (*self.state.context).clone();
         self.memory_controller.optimize_resilient(&mut optimized_context).await?;
         
+        let optimized_arc = Arc::new(optimized_context);
+        self.state.context = optimized_arc.clone();
+        
         // Atomic write: write to temp file, then rename
+        let data = serde_json::to_vec_pretty(&self.state)?;
         let temp_file = root.join(format!(".session_{}.tmp", self.state.session_id));
         tokio::fs::write(&temp_file, data).await?;
         tokio::fs::rename(&temp_file, path).await?;

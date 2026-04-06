@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
+use crate::middleware::Middleware;
+use crate::ToolCall;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
@@ -43,6 +45,8 @@ pub struct McpExecutor {
     stdio: Arc<Mutex<Option<(tokio::process::ChildStdin, tokio::io::BufReader<tokio::process::ChildStdout>)>>>,
     call_lock: Arc<Mutex<()>>,
     id_counter: AtomicI64,
+    last_error: Arc<Mutex<Option<String>>>,
+    middlewares: Vec<Arc<dyn Middleware>>,
 }
 
 impl Drop for McpExecutor {
@@ -65,7 +69,19 @@ impl McpExecutor {
             stdio: Arc::new(Mutex::new(None)),
             call_lock: Arc::new(Mutex::new(())),
             id_counter: AtomicI64::new(1),
+            last_error: Arc::new(Mutex::new(None)),
+            middlewares: Vec::new(),
         }
+    }
+
+    pub fn add_middleware(&mut self, middleware: Arc<dyn Middleware>) {
+        self.middlewares.push(middleware);
+        self.middlewares.sort_by_key(|mw| mw.priority());
+    }
+
+    pub fn with_middleware(mut self, middleware: Arc<dyn Middleware>) -> Self {
+        self.add_middleware(middleware);
+        self
     }
 
     pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
@@ -101,11 +117,16 @@ impl McpExecutor {
             let stdin = child.stdin.take().context("Failed to open stdin")?;
             let stdout = child.stdout.take().context("Failed to open stdout")?;
 
-            let mut stdio_guard = self.stdio.lock().await;
-            *stdio_guard = Some((stdin, BufReader::new(stdout)));
+            {
+                let mut stdio_guard = self.stdio.lock().await;
+                *stdio_guard = Some((stdin, BufReader::new(stdout)));
+            }
 
             *child_guard = Some(child);
             
+            // Drop guards before calling initialization to avoid deadlock in raw_call_locked
+            drop(child_guard);
+
             let init_future = async {
                 let params = serde_json::json!({
                     "protocolVersion": "2024-11-05",
@@ -122,21 +143,33 @@ impl McpExecutor {
             match res {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
+                    let mut stdio_guard = self.stdio.lock().await;
                     *stdio_guard = None;
+                    let mut child_guard = self.process.lock().await;
                     if let Some(mut c) = child_guard.take() {
                         let _ = c.start_kill();
                     }
+                    let err_msg = e.to_string();
+                    let mut err_guard = self.last_error.lock().await;
+                    *err_guard = Some(err_msg.clone());
                     return Err(e);
                 }
                 Err(_) => {
+                    let mut stdio_guard = self.stdio.lock().await;
                     *stdio_guard = None;
+                    let mut child_guard = self.process.lock().await;
                     if let Some(mut c) = child_guard.take() {
                         let _ = c.start_kill();
                     }
+                    let mut err_guard = self.last_error.lock().await;
+                    *err_guard = Some("MCP initialization timeout".into());
                     return Err(anyhow!("MCP initialization timeout"));
                 }
             }
+            return Ok(()); // Success, returned early to avoid re-locking
         }
+        let mut err_guard = self.last_error.lock().await;
+        *err_guard = None; // Reset on success
         Ok(())
     }
 
@@ -165,18 +198,27 @@ impl McpExecutor {
         stdin.flush().await?;
 
         let mut line = String::new();
-        // Skip non-JSON noise (like terminal welcome messages) until we find a valid JSON line
+        let mut skipped_lines = 0;
+        const MAX_SKIPPED_LINES: usize = 100;
+
+        // Skip non-JSON noise until we find a valid JSON line with matching ID
         let response: JsonRpcResponse = loop {
             line.clear();
             reader.read_line(&mut line).await?;
             
             if line.is_empty() {
+                // Fix Issue #4: Unsafe lock ordering. 
+                // We need to hold BOTH locks during cleanup to ensure atomicity.
+                // Since we already hold stdio_guard, let's try to lock process.
+                // To avoid deadlock, we'll try_lock or just ensure order elsewhere.
+                // Standard order: process -> stdio.
                 drop(stdio_guard);
                 let mut pguard = self.process.lock().await;
+                let mut osguard = self.stdio.lock().await;
+                
                 if let Some(mut child) = pguard.take() {
                     let _ = child.start_kill();
                 }
-                let mut osguard = self.stdio.lock().await;
                 *osguard = None;
                 return Err(anyhow!("MCP server closed connection unexpectedly. Process cleaned up."));
             }
@@ -186,10 +228,21 @@ impl McpExecutor {
             
             // Try to parse as JSON-RPC response
             if let Ok(res) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
-                break res;
+                // Fix Issue #3: Response ID Validation
+                if res.id == id {
+                    break res;
+                } else {
+                    tracing::warn!(target: "mentalist::mcp", "[{}] Received out-of-order response: expected {}, got {}", self.command, id, res.id);
+                }
             } else {
                 // Not JSON-RPC, log as info and keep looking
                 tracing::info!(target: "mentalist::mcp", "[{}] stdout: {}", self.command, trimmed);
+                
+                // Fix Issue #2: Dangerous Infinite Loop
+                skipped_lines += 1;
+                if skipped_lines > MAX_SKIPPED_LINES {
+                    return Err(anyhow!("MCP protocol violation: exceeded max skipped lines ({}) without valid JSON-RPC response", MAX_SKIPPED_LINES));
+                }
             }
         };
 
@@ -206,24 +259,53 @@ impl McpExecutor {
 #[async_trait]
 impl ToolExecutor for McpExecutor {
     async fn execute(&self, name: &str, args: Value) -> Result<String> {
+        let mut tool_call = ToolCall {
+            name: name.to_string(),
+            arguments: args,
+        };
+
+        // Fix Issue #1: Missing before_tool_call Hook
+        for mw in &self.middlewares {
+            mw.before_tool_call(&mut tool_call).await?;
+        }
+
         let params = serde_json::json!({
-            "name": name,
-            "arguments": args
+            "name": tool_call.name,
+            "arguments": tool_call.arguments
         });
 
         let result = self.call_rpc("tools/call", params).await?;
         
-        if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+        let mut output = if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+            if content.is_empty() {
+                // Fix Issue #5: Silent Failure on Empty Content
+                return Err(anyhow!("MCP tool '{}' returned empty content array", tool_call.name));
+            }
+
             let mut full_text = String::new();
             for item in content {
                 if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
                     full_text.push_str(text);
+                } else {
+                    tracing::warn!(target: "mentalist::mcp", "[{}] Tool '{}' returned content item without text field: {:?}", self.command, tool_call.name, item);
                 }
             }
-            Ok(full_text)
+            
+            if full_text.is_empty() && !content.is_empty() {
+                return Err(anyhow!("MCP tool '{}' returned content but no text fields were found", tool_call.name));
+            }
+            
+            full_text
         } else {
-            Ok(serde_json::to_string(&result)?)
+            serde_json::to_string(&result)?
+        };
+
+        // Run after_tool_call hooks
+        for mw in &self.middlewares {
+            mw.after_tool_call(&tool_call, &mut output).await?;
         }
+
+        Ok(output)
     }
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {
@@ -245,6 +327,24 @@ impl ToolExecutor for McpExecutor {
             Ok(definitions)
         } else {
             Ok(vec![])
+        }
+    }
+
+    fn status(&self) -> String {
+        if let Ok(guard) = self.process.try_lock() {
+            if guard.is_some() {
+                "Connected".to_string()
+            } else if let Ok(err_guard) = self.last_error.try_lock() {
+                if let Some(err) = &*err_guard {
+                    format!("Error: {}", err)
+                } else {
+                    "Disconnected".to_string()
+                }
+            } else {
+                "Disconnected".to_string()
+            }
+        } else {
+            "Starting...".to_string()
         }
     }
 }
