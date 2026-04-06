@@ -651,11 +651,18 @@ impl SandboxedExecutor {
                     );
                 }
 
-                self.recursive_copy(vault, &self.root_dir).await?;
-
-                // Secure cleanup with verification
-                tokio::fs::remove_dir_all(vault).await?;
-                tokio::fs::create_dir_all(vault).await?;
+                match self.recursive_copy(vault, &self.root_dir).await {
+                    Ok(_) => {
+                        // Secure cleanup only on full success
+                        tokio::fs::remove_dir_all(vault).await?;
+                        tokio::fs::create_dir_all(vault).await?;
+                        tracing::info!("Vault committed successfully and cleaned.");
+                    }
+                    Err(e) => {
+                        tracing::error!("Vault commit failed during recursive copy: {}. Vault contents preserved.", e);
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(())
@@ -728,6 +735,10 @@ impl MultiExecutor {
 
     pub async fn add_executor(&self, name: String, executor: Arc<dyn ToolExecutor>) {
         let mut guard = self.executors.lock().await;
+        if guard.iter().any(|e| e.name == name) {
+            tracing::warn!("Executor with name '{}' already exists. Overwriting registration.", name);
+            guard.retain(|e| e.name != name);
+        }
         guard.push(NamedExecutor {
             name,
             executor,
@@ -756,26 +767,29 @@ impl MultiExecutor {
 #[async_trait]
 impl ToolExecutor for MultiExecutor {
     async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
-        let mut last_err = anyhow::anyhow!("No executor found for tool: {}", name);
-        
         let guard = self.executors.lock().await;
-        for exec_entry in &*guard {
+        
+        // 1. Explicit Routing: Try executors that definitively claim this tool
+        for exec_entry in guard.iter() {
             if !exec_entry.enabled { continue; }
-            let tools = exec_entry.executor.list_tools().await?;
-            if tools.iter().any(|t| t.name == name) {
-                return exec_entry.executor.execute(name, args).await;
+            if let Ok(tools) = exec_entry.executor.list_tools().await {
+                if tools.iter().any(|t| t.name == name) {
+                    tracing::debug!("Routing tool '{}' to executor '{}'", name, exec_entry.name);
+                    return exec_entry.executor.execute(name, args).await;
+                }
             }
         }
         
-        for exec_entry in &*guard {
+        // 2. Fallback Routing: Try any enabled executor (compatibility)
+        for exec_entry in guard.iter() {
             if !exec_entry.enabled { continue; }
             match exec_entry.executor.execute(name, args.clone()).await {
                 Ok(res) => return Ok(res),
-                Err(e) => last_err = e,
+                Err(_) => continue,
             }
         }
         
-        Err(last_err)
+        Err(anyhow::anyhow!("Tool '{}' not found in any active executor", name))
     }
 
     async fn list_tools(&self) -> Result<Vec<ToolDefinition>> {

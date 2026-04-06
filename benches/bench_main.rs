@@ -50,7 +50,7 @@ fn bench_context_cloning(c: &mut Criterion) {
 }
 
 fn bench_middleware_overhead(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Benchmark: Failed to create Tokio runtime");
     let provider = Arc::new(NoOpModel);
     let mut harness = Harness::new(provider);
     
@@ -67,13 +67,15 @@ fn bench_middleware_overhead(c: &mut Criterion) {
 
     c.bench_function("harness_run_10_middlewares", |b| {
         b.to_async(&rt).iter(|| {
+            // Note: req.clone() is still required for the Harness::run signature,
+            // but the clones are cheap Arc clones of the context.
             harness.run(black_box(req.clone()))
         })
     });
 }
 
 fn bench_executor_efficiency(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Benchmark: Failed to create Tokio runtime");
     let temp_dir = std::env::temp_dir().join("mentalist_bench");
     let _ = std::fs::create_dir_all(&temp_dir);
     
@@ -81,7 +83,7 @@ fn bench_executor_efficiency(c: &mut Criterion) {
         ExecutionMode::Local,
         temp_dir.clone(),
         None
-    ).unwrap();
+    ).expect("Benchmark: Failed to initialize executor");
 
     c.bench_function("executor_local_echo", |b| {
         b.to_async(&rt).iter(|| {
@@ -101,7 +103,7 @@ fn bench_wasm_executor(c: &mut Criterion) {
 fn bench_json_parsing(c: &mut Criterion) {
     c.bench_function("bench_json_parsing_stub", |b| b.iter(|| {
         let text = r#"{"name": "test", "value": 123, "nested": {"key": "val"}}"#;
-        let _ = black_box(serde_json::from_str::<serde_json::Value>(text).unwrap());
+        let _ = black_box(serde_json::from_str::<serde_json::Value>(text).expect("Benchmark: Failed to parse JSON"));
     }));
 }
 

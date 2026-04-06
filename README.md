@@ -1,39 +1,44 @@
 # Mentalist (v0.3.1)
 
-The **Mentalist** is a high-performance, production-ready execution environment for autonomous agents in Rust. It implements the **Agent = Model + Harness** paradigm, providing the infrastructure to make LLM-based agents reliable, stateful, and context-aware through the integrated **MindPalace** memory ecosystem.
+The **Mentalist** is a high-performance, production-grade execution environment for autonomous agents in Rust. It implements the **Agent = Model + Harness** paradigm, providing the infrastructure to make LLM-based agents reliable, stateful, and context-aware through the integrated **MindPalace** memory ecosystem.
 
 ## 🚀 Key Pillars
 
-### 1. Hardened Execution Lifecycle
+### 1. Hardened & Secure Execution Lifecycle
 The harness provides a strict Interceptor pattern integrated with the resilient MindPalace pipeline. Every turn is protected by:
-- **`before_ai_call`**: Triggers **Layer 6 (HNSW Retrieval)** and **Layer 4 (Structural Compaction)** to optimize the prompt.
-- **`after_tool_call`**: Triggers **Layer 5 (Fact Extraction)** into the **RuVector-Graph** and ensures **Layer 1 (Offloading)**.
+- **`CommandValidator`**: Multi-layer security including command whitelisting, shell injection protection (regex-based sanitization), and strict path traversal guards.
+- **`is_critical` Policy**: Enhanced middleware safety where non-critical failures (like logging or planning) do not abort the core agent reasoning loop.
+- **Structured Error Handling**: Categorized tool errors (Transient, Permission Denied, Tool Not Found) with exponential backoff retry logic.
 
-### 2. Resilience Pillar
-The **DeepAgent** handles all state saves through the **ResilientMemoryController**. This ensures:
-- **Circuit Breaker Coverage**: LLM errors or storage latencies are isolated.
-- **Safe Persistence**: Integrated JSON checkpointing before and after heavy task execution.
+### 2. Resilience & Stability Pillar
+The **DeepAgent** handles all state lifecycle through the **ResilientMemoryController**.
+- **JSON Auto-Fixer**: Heuristic recovery for malformed LLM tool arguments (balances unclosed braces and fixes trailing commas).
+- **Context Management**: Automatic context optimization and compaction triggered when history reaches configurable bounds (default 50 items).
+- **Infinite Cycle Protection**: Built-in guardrails against cyclical tool patterns (max 20 calls per turn) to prevent resource exhaustion.
+- **Thread-Safe Persistence**: Mutex-guarded resilient state saving using atomic temp-file swaps.
 
 ### 3. Explicit Planning (TODO.md)
-Adopts the "Planning" pillar. The `TodoMiddleware` ensures the agent maintains objective-coherence by automatically injecting and persisting a stateful `TODO.md` file.
+Adopts the "Planning" pillar. The `TodoMiddleware` ensures the agent maintains objective-coherence by automatically injecting and persisting a stateful `TODO.md` file, with hardened IO error handling for reliability.
 
-### 4. Native & Docker Isolation
+### 4. Sandboxed Isolation
 Includes a `SandboxedExecutor` for high-security tool execution:
-- **Wasmtime (Natively Secure)**: Capability-based security for running tools like Python via Wasm.
-- **Docker (Native `bollard`)**: Full container isolation with auto-pull support.
+- **Wasmtime (Natively Secure)**: Capability-based security for running tools like Python via Wasm with strict filesystem mounting.
+- **Docker (Native `bollard`)**: Full container isolation with verified resource limits (CPU/Memory memory validation post-creation).
+- **POSIX Permission Security**: Execution-bit validation for skill scripts to ensure diagnostic clarity.
 
 ### 5. Multi-Protocol Tool Support
 Exposes a flexible executor architecture:
 - **MCP (Model Context Protocol)**: Direct integration with domestic and remote MCP servers via the `McpExecutor`. Supports standard-compliant `initialize` handshakes and JSON-RPC.
-- **Skills System**: A filesystem-based tool discovery system. Agents can "learn" new capabilities by simply dropping `.py` or `.js` scripts into a designated skills directory.
-- **Built-in Helpers**: Native support for **Filesystem** and **Firecrawl** (Web-Search) MCP servers via `BuiltinMcp`.
+- **Skills System**: A filesystem-based tool discovery system with validated script execution (Python, JS, Shell).
+- **MultiExecutor**: Advanced tool routing with registration collision detection and first-match priority.
+- **Sensitive Data Redaction**: Automatic masking of `api_key`, `token`, and `secret` values in diagnostic logs.
 
 ## 🛠️ Usage Example (v1.0.0)
 
 Integrated with the hardened MindPalace memory architecture:
 
 ```rust
-use mentalist::{Harness, DeepAgent, DeepAgentState};
+use mentalist::{Harness, DeepAgent, DeepAgentState, StepConfig};
 use mentalist::executor::{SandboxedExecutor, ExecutionMode};
 use mem_resilience::{ResilientMemoryController, CircuitBreaker};
 use brain::Brain;
@@ -42,27 +47,34 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 1. Initialize the Hardened Memory Brain
-    let mut brain = Brain::new(Some(metrics), Some(token_counter));
-    brain.add_layer(Arc::new(FactExtractor::new(...)));
+    let brain = Arc::new(Brain::new(mem_core::MindPalaceConfig::default(), None, None));
     
     // 2. Setup the Resilience Controller
     let controller = Arc::new(ResilientMemoryController::new(
-        Arc::new(brain), 
+        brain, 
         storage, 
         5 // failure threshold
     ));
 
     // 3. Initialize the DeepAgent with Sandboxed Execution
-    let executor = SandboxedExecutor::new(
+    let executor = Arc::new(SandboxedExecutor::new(
         ExecutionMode::Docker { image: "python:3.10-slim".into() },
-        PathBuf::from("./workdir")
-    );
+        PathBuf::from("./workdir"),
+        None
+    )?);
+    
+    let config = StepConfig {
+        max_turns: 15,
+        max_tool_calls_per_turn: 10,
+        ..Default::default()
+    };
     
     let mut agent = DeepAgent::new(
         harness, 
         state, 
         executor, 
-        controller
+        controller,
+        Some(config)
     );
     
     // 4. Integrated Step with Resilience & Planning

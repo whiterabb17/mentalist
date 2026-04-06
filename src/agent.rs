@@ -25,6 +25,7 @@ pub struct StepConfig {
     pub fail_on_limit: bool,
     pub max_retries: usize,
     pub max_context_items: usize,
+    pub max_tool_calls_per_turn: usize,
 }
 
 impl Default for StepConfig {
@@ -35,6 +36,7 @@ impl Default for StepConfig {
             fail_on_limit: false,
             max_retries: 3,
             max_context_items: 50,
+            max_tool_calls_per_turn: 20,
         }
     }
 }
@@ -77,6 +79,8 @@ pub struct DeepAgent {
     pub executor: Arc<dyn ToolExecutor>,
     pub memory_controller: Arc<ResilientMemoryController<FileStorage>>,
     pub scheduler: Option<DreamScheduler<FileStorage>>,
+    /// Prevents concurrent state file writes.
+    pub save_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DeepAgent {
@@ -87,7 +91,14 @@ impl DeepAgent {
         memory_controller: Arc<ResilientMemoryController<FileStorage>>,
         scheduler: Option<DreamScheduler<FileStorage>>
     ) -> Self {
-        Self { harness, state, executor, memory_controller, scheduler }
+        Self { 
+            harness, 
+            state, 
+            executor, 
+            memory_controller, 
+            scheduler,
+            save_mutex: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Executes a single reasoning/action step following the DeepAgent loop.
@@ -153,6 +164,8 @@ impl DeepAgent {
                     }
                     break;
                 }
+                
+                let mut tool_calls_this_turn = 0;
 
                 // Check timeout
                 if start_time.elapsed().as_secs() > config.timeout_seconds {
@@ -173,6 +186,7 @@ impl DeepAgent {
                 let mut tool_calls = Vec::new();
                 let mut current_tool_name = String::new();
                 let mut current_tool_args = String::new();
+                let mut processed_final_chunk = false;
 
                 while let Some(chunk_res) = stream.next().await {
                     let chunk = chunk_res?;
@@ -191,7 +205,7 @@ impl DeepAgent {
                         }
                     }
 
-                    if chunk.is_final && !current_tool_name.is_empty() {
+                    if chunk.is_final && !current_tool_name.is_empty() && !processed_final_chunk {
                         let fixed_args = Self::fix_json(&current_tool_args);
                         let arguments: serde_json::Value = serde_json::from_str(&fixed_args)
                             .map_err(|e| {
@@ -201,6 +215,7 @@ impl DeepAgent {
                         tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
                         current_tool_args.clear();
                         current_tool_name.clear();
+                        processed_final_chunk = true;
                     }
                 }
 
@@ -216,6 +231,14 @@ impl DeepAgent {
                 }
 
                 for mut tool in tool_calls {
+                    tool_calls_this_turn += 1;
+                    if tool_calls_this_turn > config.max_tool_calls_per_turn {
+                        let msg = format!("Security: Infinite tool chain detected (> {} calls in one turn). Aborting turn.", config.max_tool_calls_per_turn);
+                        tracing::error!(msg);
+                        yield AgentStepEvent::Status("Security Alert: Infinite Tool Cycle Detected".into());
+                        break; // Stop processing tools and reasoning
+                    }
+
                     let tool_name = tool.name.clone();
                     yield AgentStepEvent::ToolStarted(tool_name.clone());
                     
@@ -299,6 +322,7 @@ impl DeepAgent {
 
     /// Persists agent state atomically using temp files.
     pub async fn save_state_resilient(&mut self) -> anyhow::Result<()> {
+        let _guard = self.save_mutex.lock().await;
         let root = PathBuf::from(".agent/sessions");
         
         // Atomic directory creation

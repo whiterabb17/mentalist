@@ -138,6 +138,17 @@ impl ToolExecutor for SkillExecutor {
                 tracing::warn!("Skipping symlink script: {:?}", script_path);
                 continue;
             }
+
+            // POSIX Permission Check: Ensure script is executable
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let metadata = std::fs::metadata(&script_path)?;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    tracing::warn!("Script exists but is not executable: {:?}", script_path);
+                    anyhow::bail!("Skill script {:?} is not executable. Please run 'chmod +x' on it.", script_name);
+                }
+            }
             
             let mut cmd = if script_name.ends_with(".sh") {
                 let mut c = tokio::process::Command::new("bash");
