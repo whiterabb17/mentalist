@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody as Config, HostConfig};
