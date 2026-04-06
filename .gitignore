@@ -1,6 +1,2 @@
 target
-.agent
-*.lock
-issues2.md
-issues3.md
-docs/futures.md
+.agent  

@@ -137,11 +137,12 @@ impl MindPalaceMiddleware {
         session_id: String,
         dimension: usize,
         vault_path: PathBuf,
+        config_override: Option<MindPalaceConfig>,
     ) -> Self {
-        let config = MindPalaceConfig {
+        let config = config_override.unwrap_or_else(|| MindPalaceConfig {
             max_context_items: 50, // Standard threshold for deep focus
             ..Default::default()
-        };
+        });
 
         let mut brain = Brain::new(config.clone(), None, Some(token_counter));
 

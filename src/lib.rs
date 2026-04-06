@@ -26,6 +26,8 @@ pub struct Harness {
     pub provider: Arc<dyn ModelProvider>,
     pub middlewares: Vec<Arc<dyn middleware::Middleware>>,
     pub config: config::MentalistConfig,
+    /// Internal counter to prevent infinite recursion in middleware/provider chains.
+    pub call_depth: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Harness {
@@ -34,6 +36,7 @@ impl Harness {
             provider,
             middlewares: Vec::new(),
             config: config::MentalistConfig::default(),
+            call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -50,12 +53,20 @@ impl Harness {
     /// Orchestrated Execution Loop following DeepAgent methodology.
     #[tracing::instrument(skip(self, req), fields(prompt_len = req.prompt.len()))]
     pub async fn run(&self, mut req: Request) -> crate::error::Result<Response> {
+        // Recursion guard: prevent infinite loops (e.g. middleware calls harness recursively)
+        let depth = self.call_depth.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if depth > 10 {
+            self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(crate::error::MentalistError::Internal("Infinite recursion detected in Harness (depth > 10)".into()));
+        }
+
         // 1. Hook: before_ai_call (Context Optimization/Planning)
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
                     tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in before_ai_call");
+                    self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     return Err(crate::error::MentalistError::MiddlewareError {
                         middleware: mw_name.to_string(),
                         source: e,
@@ -68,35 +79,47 @@ impl Harness {
 
         // 2. Execute AI reasoning
         let mut res = self.provider.complete(req).await
-            .map_err(crate::error::MentalistError::ProviderError)?;
-
-        // 3. Hook: after_ai_call (Response Parsing/Intent Extraction)
-        for mw in &self.middlewares {
-            if let Err(e) = mw.after_ai_call(&mut res).await {
-                let mw_name = mw.name();
-                if mw.is_critical() {
-                    tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in after_ai_call");
-                    return Err(crate::error::MentalistError::MiddlewareError {
-                        middleware: mw_name.to_string(),
-                        source: e,
-                    });
-                } else {
-                    tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in after_ai_call. Continuing.");
+            .map_err(crate::error::MentalistError::ProviderError);
+        
+        if let Ok(ref mut res_val) = res {
+            // 3. Hook: after_ai_call (Response Parsing/Intent Extraction)
+            for mw in &self.middlewares {
+                if let Err(e) = mw.after_ai_call(res_val).await {
+                    let mw_name = mw.name();
+                    if mw.is_critical() {
+                        tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in after_ai_call");
+                        self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        return Err(crate::error::MentalistError::MiddlewareError {
+                            middleware: mw_name.to_string(),
+                            source: e,
+                        });
+                    } else {
+                        tracing::warn!(middleware = mw_name, error = %e, "Non-critical middleware failure in after_ai_call. Continuing.");
+                    }
                 }
             }
         }
 
-        Ok(res)
+        self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        res.map_err(Into::into)
     }
 
     /// Orchestrated Streaming Loop with Post-Hook Support.
     #[tracing::instrument(skip(self, req), fields(prompt_len = req.prompt.len()))]
     pub async fn run_stream(&self, mut req: Request) -> crate::error::Result<BoxStream<'static, crate::error::Result<ResponseChunk>>> {
+        // Recursion guard
+        let depth = self.call_depth.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if depth > 10 {
+            self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(crate::error::MentalistError::Internal("Infinite recursion detected in Harness stream (depth > 10)".into()));
+        }
+
         for mw in &self.middlewares {
             if let Err(e) = mw.before_ai_call(&mut req).await {
                 let mw_name = mw.name();
                 if mw.is_critical() {
                     tracing::error!(middleware = mw_name, error = %e, "Critical middleware failure in before_ai_call");
+                    self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     return Err(crate::error::MentalistError::MiddlewareError {
                         middleware: mw_name.to_string(),
                         source: e,
@@ -111,6 +134,7 @@ impl Harness {
         let inner_stream = self.provider.stream_complete(req).await
             .map_err(crate::error::MentalistError::ProviderError)?;
         let middlewares = self.middlewares.clone();
+        let depth_ptr = self.call_depth.clone();
 
         // Wrap stream to apply post-hooks after completion
         let wrapped = async_stream::try_stream! {
@@ -138,6 +162,8 @@ impl Harness {
                     // We don't bail the stream here as it's already finished, but we log
                 }
             }
+            
+            depth_ptr.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         };
 
         Ok(Box::pin(wrapped))

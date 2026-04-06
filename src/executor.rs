@@ -525,8 +525,9 @@ impl SandboxedExecutor {
             State {
                 wasi,
                 limits: Limits {
-                    max_memory: 4 * 1024 * 1024 * 1024,
-                }, // 4GB
+                    // Convert MB to bytes, default to 1GB if 0 for some reason.
+                    max_memory: (self.validator.max_memory_mb.max(1024) * 1024 * 1024) as usize,
+                },
             },
         );
         store.set_fuel(50_000_000)?; // 50M instructions
