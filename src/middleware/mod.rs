@@ -388,6 +388,13 @@ impl Middleware for ToolDiscoveryMiddleware {
         "ToolDiscovery"
     }
 
+    /// Tool discovery failure should degrade gracefully — the agent can still respond
+    /// without tools rather than crashing the entire request chain. An MCP process
+    /// that fails to start (e.g. npx not on PATH) would otherwise abort every call.
+    fn is_critical(&self) -> bool {
+        false
+    }
+
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
         let tools = self.executor.list_tools().await?;
         req.tools.extend(tools);

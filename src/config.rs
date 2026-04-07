@@ -49,6 +49,7 @@ pub struct ExecutorConfig {
     pub vault_dir: Option<PathBuf>,
     pub docker_image: Option<String>,
     pub wasm_module_path: Option<PathBuf>,
+    pub mcp_initialize_timeout_seconds: u64,
 }
 
 impl Default for ExecutorConfig {
@@ -59,6 +60,7 @@ impl Default for ExecutorConfig {
             vault_dir: None,
             docker_image: Some("python:3.11-slim".to_string()),
             wasm_module_path: None,
+            mcp_initialize_timeout_seconds: 60,
         }
     }
 }

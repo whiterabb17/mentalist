@@ -171,7 +171,6 @@ impl DeepAgent {
                 let mut tool_calls = Vec::new();
                 let mut current_tool_name = String::new();
                 let mut current_tool_args = String::new();
-                let mut processed_final_chunk = false;
 
                 while let Some(chunk_res) = stream.next().await {
                     let chunk = chunk_res?;
@@ -183,6 +182,27 @@ impl DeepAgent {
 
                     if let Some(delta) = chunk.tool_call_delta {
                         if let Some(name) = delta.name {
+                            // Flush any previously buffered tool call before starting a new one.
+                            // This supports providers that emit multiple tool calls as sequential
+                            // ResponseChunks rather than a single delta stream.
+                            if !current_tool_name.is_empty() {
+                                let fixed_args = Self::fix_json(&current_tool_args);
+                                match serde_json::from_str::<serde_json::Value>(&fixed_args) {
+                                    Ok(arguments) => {
+                                        tracing::debug!(tool = %current_tool_name, "Flushing intermediate tool call");
+                                        tool_calls.push(ToolCall {
+                                            name: std::mem::take(&mut current_tool_name),
+                                            arguments,
+                                        });
+                                        current_tool_args.clear();
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, raw = %current_tool_args, "Failed to parse intermediate tool args; discarding");
+                                        current_tool_name.clear();
+                                        current_tool_args.clear();
+                                    }
+                                }
+                            }
                             current_tool_name.push_str(&name);
                         }
                         if let Some(args) = delta.arguments_delta {
@@ -190,7 +210,8 @@ impl DeepAgent {
                         }
                     }
 
-                    if chunk.is_final && !current_tool_name.is_empty() && !processed_final_chunk {
+                    // Flush the last buffered tool call on the final stream chunk.
+                    if chunk.is_final && !current_tool_name.is_empty() {
                         let fixed_args = Self::fix_json(&current_tool_args);
                         let arguments: serde_json::Value = serde_json::from_str(&fixed_args)
                             .map_err(|e| {
@@ -200,7 +221,21 @@ impl DeepAgent {
                         tool_calls.push(ToolCall { name: current_tool_name.clone(), arguments });
                         current_tool_args.clear();
                         current_tool_name.clear();
-                        processed_final_chunk = true;
+                    }
+                }
+
+                // FALLBACK: If no native tool_calls were detected from JSON deltas but the
+                // accumulated text content contains a text-encoded tool call, attempt to parse
+                // it. This is critical for small models (e.g. qwen2.5-coder:3b) that frequently
+                // emit tool calls inside <tool_call> XML, ```json blocks, or as raw JSON objects
+                // rather than via the structured tool_call_delta mechanism.
+                if tool_calls.is_empty() && !final_content.is_empty() {
+                    if let Some(fallback_call) = Self::parse_tool_call_from_text(&final_content) {
+                        tracing::info!(tool_name = %fallback_call.name, "Text-encoded tool call detected via fallback parser");
+                        // Remove the raw tool-call text from the response content so it
+                        // doesn't appear as a visible message in the chat output.
+                        final_content.clear();
+                        tool_calls.push(fallback_call);
                     }
                 }
 
@@ -362,6 +397,82 @@ impl DeepAgent {
         }
 
         fixed
+    }
+
+    /// Attempts to extract a single tool call from text content using multiple fallback
+    /// strategies. Used when the model emits tool calls as formatted text rather than
+    /// via the native `tool_calls` JSON field in the provider response.
+    ///
+    /// Strategies (in priority order):
+    /// 1. XML-style `<tool_call>{...}</tool_call>` tags
+    /// 2. Fenced ` ```json ... ``` ` or ` ``` ... ``` ` code blocks
+    /// 3. Raw JSON object at the top level of the content string
+    fn parse_tool_call_from_text(content: &str) -> Option<ToolCall> {
+        // 1. Try XML-like <tool_call>...</tool_call>
+        if let Some(start) = content.find("<tool_call>") {
+            if let Some(end_offset) = content[start..].find("</tool_call>") {
+                let json_str = &content[start + 11..start + end_offset];
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    if let (Some(name), Some(args)) = (
+                        val["name"].as_str(),
+                        val["arguments"].as_object(),
+                    ) {
+                        return Some(ToolCall {
+                            name: name.to_string(),
+                            arguments: serde_json::Value::Object(args.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Try fenced ```json ... ``` or ``` ... ``` code blocks
+        if let Some(start) = content.find("```json") {
+            let search = &content[start + 7..];
+            if let Some(end) = search.find("```") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(search[..end].trim()) {
+                    if let (Some(name), Some(args)) = (
+                        val["name"].as_str(),
+                        val["arguments"].as_object(),
+                    ) {
+                        return Some(ToolCall {
+                            name: name.to_string(),
+                            arguments: serde_json::Value::Object(args.clone()),
+                        });
+                    }
+                }
+            }
+        } else if let Some(start) = content.find("```") {
+            let search = &content[start + 3..];
+            if let Some(end) = search.find("```") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(search[..end].trim()) {
+                    if let (Some(name), Some(args)) = (
+                        val["name"].as_str(),
+                        val["arguments"].as_object(),
+                    ) {
+                        return Some(ToolCall {
+                            name: name.to_string(),
+                            arguments: serde_json::Value::Object(args.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 3. Try parsing the entire content as a raw JSON object
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(content.trim()) {
+            if let (Some(name), Some(args)) = (
+                val["name"].as_str(),
+                val["arguments"].as_object(),
+            ) {
+                return Some(ToolCall {
+                    name: name.to_string(),
+                    arguments: serde_json::Value::Object(args.clone()),
+                });
+            }
+        }
+
+        None
     }
 }
 

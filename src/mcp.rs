@@ -49,6 +49,7 @@ pub struct McpExecutor {
     id_counter: AtomicI64,
     last_error: Arc<Mutex<Option<String>>>,
     middlewares: Vec<Arc<dyn Middleware>>,
+    pub initialization_timeout: std::time::Duration,
 }
 
 impl Drop for McpExecutor {
@@ -73,7 +74,13 @@ impl McpExecutor {
             id_counter: AtomicI64::new(1),
             last_error: Arc::new(Mutex::new(None)),
             middlewares: Vec::new(),
+            initialization_timeout: std::time::Duration::from_secs(60),
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.initialization_timeout = timeout;
+        self
     }
 
     pub fn add_middleware(&mut self, middleware: Arc<dyn Middleware>) {
@@ -141,7 +148,7 @@ impl McpExecutor {
                 self.raw_call_locked("initialize", params).await
             };
 
-            let res = tokio::time::timeout(std::time::Duration::from_secs(10), init_future).await;
+            let res = tokio::time::timeout(self.initialization_timeout, init_future).await;
             match res {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {

@@ -21,7 +21,7 @@ async fn test_ollama_real_world_interaction() {
         embedding_model, 
         Some(32768)
     ));
-    let token_counter = provider.clone();
+    // provider implements LlmClient, EmbeddingProvider, and TokenCounter
     
     let mp_config = MindPalaceConfig {
         similarity_threshold: 0.85,
@@ -49,7 +49,7 @@ async fn test_ollama_real_world_interaction() {
         session_id.clone(),
         768, // nomic-embed-text dimension
         vault_path,
-        None,
+        Some(mp_config),
     );
     
     let mut harness = Harness::new(provider.clone());

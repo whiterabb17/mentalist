@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "brain"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "mem-bridge",
@@ -1180,9 +1180,9 @@ checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
 name = "fastrand"
-version = "2.4.0"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a043dc74da1e37d6afe657061213aa6f425f855399a11d3463c6ecccc4dfda1f"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fd-lock"
@@ -2236,7 +2236,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mem-bridge"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2250,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "mem-compactor"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "mem-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2293,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "mem-dreamer"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "mem-extractor"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "mem-micro"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "mem-offloader"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "mem-personality"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "mem-resilience"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "mem-retriever"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "mem-session"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "mentalist"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-recursion",

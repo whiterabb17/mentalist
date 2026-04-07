@@ -93,7 +93,8 @@ async fn main() -> Result<()> {
         mock_tokens.clone(),
         session_id.clone(),
         384,
-        storage_root.join("vault")
+        storage_root.join("vault"),
+        None, // config_override: use defaults
     );
 
     // 2. Resilience Setup
