@@ -1,6 +1,7 @@
 use mem_planner::{ExecutionPlan, TaskId, TaskNode};
 use std::collections::HashSet;
 
+#[derive(Debug, Clone)]
 pub struct TaskGraph {
     pub plan: ExecutionPlan,
 }

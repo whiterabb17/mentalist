@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 6. Run Mission
     let goal = "Analyze the repository for modularity gaps and propose a refactoring plan.";
-    let result = runtime.run(goal, Context::default()).await?;
+    let result = runtime.run(goal, Context::default(), None).await?;
 
     println!("--- MISSION COMPLETE ---");
     println!("Final Result: {}", result);

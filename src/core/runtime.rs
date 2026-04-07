@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use mem_core::Context;
 use crate::cognition::{Planner, Critic};
 use crate::execution::executor::Executor;
@@ -36,18 +37,29 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub async fn run(&self, goal: &str, ctx: Context) -> anyhow::Result<String> {
+    pub async fn run(
+        &self, 
+        goal: &str, 
+        ctx: Context, 
+        tx: Option<UnboundedSender<RuntimeEvent>>
+    ) -> anyhow::Result<String> {
         let mut step = 0;
         let mut completed = false;
 
         while step < self.limits.max_steps && !completed {
             step += 1;
+            
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "PLAN".into() });
+                let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Planning...", step)));
+            }
+            
             tracing::info!(step, goal, "Phase: PLAN");
             
             // 1. PLAN
             let mut plan = self.planner.create_plan(goal, &ctx, None).await?;
             
-            // Fallback: If plan is empty, try parsing tools from the last message in context
+            // Fallback
             if plan.tasks.is_empty() {
                 if let Some(last_msg) = ctx.items.last() {
                     let fallback_nodes = self.parse_fallback_tool_calls(&last_msg.content);
@@ -61,19 +73,30 @@ impl AgentRuntime {
             }
 
             // 2. EXECUTE
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "EXECUTE".into() });
+                let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Executing tasks...", step)));
+            }
+            
             tracing::info!(step, "Phase: EXECUTE");
             let graph = crate::execution::graph::TaskGraph::new(plan);
             let tools = Arc::clone(&self.tools);
             let security = Arc::clone(&self.security);
+            let tx_inner = tx.clone();
 
             let results = self.executor.execute_parallel(&graph, move |task| {
                 let tools = Arc::clone(&tools);
                 let security = Arc::clone(&security);
+                let tx_deep = tx_inner.clone();
                 async move {
                     let mut success = false;
                     let mut output = serde_json::Value::String("Task failed: No tool specified".into());
 
                     if let Some(tool_name) = task.tool_name {
+                        if let Some(ref tx) = tx_deep {
+                            let _ = tx.send(RuntimeEvent::ToolStarted(tool_name.clone()));
+                        }
+                        
                         if let Err(e) = security.validate_tool_call(&tool_name) {
                             output = serde_json::Value::String(format!("Security Violation: {}", e));
                         } else if let Some(tool) = tools.get(&tool_name).await {
@@ -90,6 +113,10 @@ impl AgentRuntime {
                         } else {
                             output = serde_json::Value::String(format!("Tool '{}' not found", tool_name));
                         }
+                        
+                        if let Some(ref tx) = tx_deep {
+                            let _ = tx.send(RuntimeEvent::ToolFinished(tool_name, output.to_string(), success));
+                        }
                     }
 
                     crate::execution::executor::ExecutionResult {
@@ -101,10 +128,19 @@ impl AgentRuntime {
             }).await?;
 
             // 3. CRITIQUE
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "CRITIQUE".into() });
+                let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Critiquing results...", step)));
+            }
+            
             tracing::info!(step, "Phase: CRITIQUE");
             let feedback = self.critic.evaluate(&results).await?;
             
             // 4. STORE MEMORY
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "STORE".into() });
+            }
+            
             tracing::info!(step, "Phase: STORE MEMORY");
             for (_, res) in results {
                 self.memory.store(crate::memory::MemoryEvent {
@@ -115,10 +151,19 @@ impl AgentRuntime {
             }
 
             // 5. ADAPT
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "ADAPT".into() });
+                let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Adapting plan...", step)));
+            }
+            
             tracing::info!(step, feedback = feedback.critique, "Phase: ADAPT");
             if feedback.score > 0.9 && !feedback.suggests_retry {
                 completed = true;
             }
+        }
+
+        if let Some(ref tx) = tx {
+            let _ = tx.send(RuntimeEvent::Status("Goal completed.".into()));
         }
 
         Ok("Goal completed".into())
@@ -131,20 +176,17 @@ impl AgentRuntime {
     ) -> impl futures_util::Stream<Item = anyhow::Result<RuntimeEvent>> + '_ {
         use futures_util::stream;
         
-        stream::unfold((0, false, ctx, goal), move |(mut step, mut completed, mut ctx, goal)| async move {
+        stream::unfold((0, false, ctx, goal), move |(mut step, mut completed, ctx, goal)| async move {
             if step >= self.limits.max_steps || completed {
                 return None;
             }
             step += 1;
 
-            // Simple wrapper to yield multiple events for one step if needed
-            // For a mature implementation, this would be a more complex state machine
-            
             // 1. PLAN
             let plan_res = self.planner.create_plan(&goal, &ctx, None).await;
             let mut plan = match plan_res {
                 Ok(p) => p,
-                Err(e) => return Some((Err(e), (step, true, ctx))),
+                Err(e) => return Some((Err(e), (step, true, ctx, goal))),
             };
 
             // Fallback
@@ -161,7 +203,7 @@ impl AgentRuntime {
                 return Some((Ok(RuntimeEvent::Status("No more tasks planned.".into())), (step, true, ctx, goal)));
             }
 
-            // 2. EXECUTE (We'll yield tool events)
+            // 2. EXECUTE
             let graph = crate::execution::graph::TaskGraph::new(plan);
             let tools = Arc::clone(&self.tools);
             let security = Arc::clone(&self.security);
@@ -200,39 +242,35 @@ impl AgentRuntime {
 
             let results = match results_res {
                 Ok(r) => r,
-                Err(e) => return Some((Err(e), (step, true, ctx))),
+                Err(e) => return Some((Err(e), (step, true, ctx, goal))),
             };
 
             // 3. CRITIQUE
             let feedback_res = self.critic.evaluate(&results).await;
             let feedback = match feedback_res {
                 Ok(f) => f,
-                Err(e) => return Some((Err(e), (step, true, ctx))),
+                Err(e) => return Some((Err(e), (step, true, ctx, goal))),
             };
 
             if feedback.score > 0.9 && !feedback.suggests_retry {
                 completed = true;
             }
 
-            // Update context (Side effects in mentalist usually handled by the caller or middleware)
-            // For this stream, we just yield a status
             Some((Ok(RuntimeEvent::Status(format!("Step {} complete: {}", step, feedback.critique))), (step, completed, ctx, goal)))
         })
     }
 
-    /// Fallback parser for tool calls embedded in raw text (XML tags, code blocks, or raw JSON).
-    /// Used when the model fails to emit structured tool call JSON but provides text-based intent.
     pub fn parse_fallback_tool_calls(&self, content: &str) -> Vec<mem_planner::TaskNode> {
         let mut tasks = Vec::new();
         
-        // 1. XML-style fallback: <call name="tool_name">{"arg":"val"}</call>
+        // XML-style fallback
         let xml_regex = regex::Regex::new(r#"<call\s+name="([^"]+)"\s*>(.*?)</call>"#).ok();
         if let Some(re) = xml_regex {
             for cap in re.captures_iter(content) {
                 let name = cap[1].to_string();
                 let args_str = cap[2].trim();
                 let args = serde_json::from_str(args_str).unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                let id = mem_planner::TaskId(format!("fallback_{}", tasks.len()));
+                let id = mem_planner::TaskId::new();
                 tasks.push(mem_planner::TaskNode {
                     id,
                     name: format!("Fallback: {}", name),
@@ -245,14 +283,14 @@ impl AgentRuntime {
             }
         }
 
-        // 2. Fenced code block fallback: ```tool:name ... ```
+        // Fenced code block fallback
         if tasks.is_empty() {
             let fence_regex = regex::Regex::new(r"```tool:([a-zA-Z0-9_-]+)\s*\n(.*?)\n```").ok();
             if let Some(re) = fence_regex {
                 for cap in re.captures_iter(content) {
                     let name = cap[1].to_string();
                     let args = serde_json::from_str(cap[2].trim()).unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    let id = mem_planner::TaskId(format!("fallback_{}", tasks.len()));
+                    let id = mem_planner::TaskId::new();
                     tasks.push(mem_planner::TaskNode {
                         id,
                         name: format!("Fallback: {}", name),
@@ -262,28 +300,6 @@ impl AgentRuntime {
                         dependencies: Vec::new(),
                         metadata: serde_json::json!({ "fallback": true }),
                     });
-                }
-            }
-        }
-
-        // 3. Raw JSON object fallback: {"tool": "name", "arguments": {}}
-        if tasks.is_empty() {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(content.trim()) {
-                if let Some(obj) = val.as_object() {
-                    let name = obj.get("tool").or_else(|| obj.get("name")).and_then(|v| v.as_str());
-                    let args = obj.get("arguments").or_else(|| obj.get("args")).cloned();
-                    if let Some(name) = name {
-                        let id = mem_planner::TaskId(format!("fallback_json_{}", tasks.len()));
-                        tasks.push(mem_planner::TaskNode {
-                            id,
-                            name: format!("Fallback: {}", name),
-                            description: format!("Extracted from raw JSON: {}", name),
-                            tool_name: Some(name.to_string()),
-                            tool_args: args,
-                            dependencies: Vec::new(),
-                            metadata: serde_json::json!({ "fallback": true }),
-                        });
-                    }
                 }
             }
         }

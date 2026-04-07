@@ -118,9 +118,11 @@ fn bench_context_cloning(c: &mut Criterion) {
 
 fn bench_executor_efficiency(c: &mut Criterion) {
     let rt = Runtime::new().expect("Benchmark: Failed to create Tokio runtime");
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(TestTool));
-    let executor = Arc::new(Executor::new(Arc::new(registry)));
+    let executor = rt.block_on(async {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool)).await;
+        Arc::new(Executor::new(Arc::new(registry)))
+    });
     
     let mut plan = ExecutionPlan::new();
     let task_id = TaskId("task-1".into());
@@ -142,7 +144,7 @@ fn bench_executor_efficiency(c: &mut Criterion) {
             let task_id_inner = task_id.clone();
             async move {
                 executor.execute_parallel(&graph, move |task| {
-                    let tid = task_id_inner.clone();
+                    let _tid = task_id_inner.clone();
                     // Fix: task is TaskNode, so we can use its ID
                     let tid_from_task = task.id.clone();
                     async move {
@@ -161,9 +163,11 @@ fn bench_executor_efficiency(c: &mut Criterion) {
 fn bench_runtime_overhead(c: &mut Criterion) {
     let rt = Runtime::new().expect("Benchmark: Failed to create Tokio runtime");
     
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(TestTool));
-    let tool_registry = Arc::new(registry);
+    let tool_registry = rt.block_on(async {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool)).await;
+        Arc::new(registry)
+    });
     
     let policy = Policy {
         allowed_capabilities: vec![],
@@ -185,7 +189,7 @@ fn bench_runtime_overhead(c: &mut Criterion) {
 
     c.bench_function("agent_runtime_1_step", |b| {
         b.to_async(&rt).iter(|| {
-            runtime.run("test goal", ctx.clone())
+            runtime.run("test goal", ctx.clone(), None)
         })
     });
 }

@@ -9,21 +9,33 @@ pub mod telemetry;
 pub mod config;
 pub mod middleware;
 
-pub use core::runtime::{AgentRuntime, ExecutionLimits};
-pub use core::state::{AgentState, Goal};
+// Re-exports for a clean public API
+pub use core::runtime::{AgentRuntime, ExecutionLimits, RuntimeEvent};
+pub use core::state::{AgentState, AgentState as DeepAgentState, Goal};
 pub use cognition::{Planner, MindPalacePlanner, Critic, DefaultCritic};
 pub use memory::{MemoryStore, MindPalaceMemory};
 pub use execution::executor::{Executor, ExecutionResult};
 pub use execution::graph::TaskGraph;
 pub use tools::registry::ToolRegistry;
 pub use tools::Tool;
-pub use llm::{LLMProvider, LLMRouter};
+pub use llm::{LLMProvider, LLMRouter, MindPalaceLLM};
 pub use security::{SecurityEngine, Capability, Policy};
 pub use telemetry::init_telemetry;
-pub use config::RuntimeConfig;
+pub use config::{RuntimeConfig, SecurityConfig, AgentConfig};
 
 // Core types from mem-core for convenience
-pub use mem_core::{Request, Response, ToolCall, Context, MemoryItem, MemoryRole};
+pub use mem_core::{
+    Request, Response, ToolCall, Context, MemoryItem, MemoryRole, 
+    ModelProvider, EmbeddingProvider, TokenCounter
+};
+
+// Re-export mem-planner for easier dependency management in agents
+pub use mem_planner;
+
+// Error handling
+pub mod error {
+    pub use anyhow::Error as MentalistError;
+}
 
 // --- Compatibility Layer for Gypsy (v0.3.3 -> v0.3.5) ---
 
@@ -68,6 +80,11 @@ pub mod executor {
         pub async fn add_tool(&self, tool: Arc<dyn crate::tools::Tool>) {
             self.registry.register(tool).await;
         }
+
+        pub async fn list_executors(&self) -> Vec<(String, bool, String)> {
+             // Return dummy info for TUI compatibility
+             vec![("mcp:filesystem".into(), true, "Running".into())]
+        }
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -79,7 +96,6 @@ pub mod executor {
 }
 
 pub mod skills {
-    // New architecture uses ToolRegistry for everything.
     pub type SkillExecutor = crate::tools::registry::ToolRegistry;
 }
 

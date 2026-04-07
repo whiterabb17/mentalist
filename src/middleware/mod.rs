@@ -1,4 +1,3 @@
-use crate::execution::executor::Executor;
 use crate::tools::registry::ToolRegistry;
 pub use mem_core::{Request, Response, ToolCall, Context};
 use async_trait::async_trait;

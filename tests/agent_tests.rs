@@ -90,7 +90,7 @@ async fn test_runtime_multi_phase_reasoning() {
         limits: ExecutionLimits { max_steps: 3, timeout_seconds: 60 },
     };
 
-    let result = runtime.run("Complex multi-phase goal", Context::default()).await;
+    let result = runtime.run("Complex multi-phase goal", Context::default(), None).await;
     assert!(result.is_ok(), "Runtime failed: {:?}", result.err());
     
     // Core Verification: Ensure we actually went through multiple phases.
