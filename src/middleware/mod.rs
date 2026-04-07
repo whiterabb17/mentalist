@@ -129,6 +129,7 @@ impl MindPalaceMiddleware {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn hardened(
         storage: FileStorage,
         llm: Arc<dyn mem_core::LlmClient>,

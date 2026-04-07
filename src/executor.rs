@@ -334,7 +334,7 @@ impl ToolExecutor for SandboxedExecutor {
                 #[cfg(not(feature = "wasm-tools"))]
                 let res = {
                     let _ = (module_path, mount_root, env_vars);
-                    Err(anyhow::anyhow!("Wasm tools feature disabled").into())
+                    Err(anyhow::anyhow!("Wasm tools feature disabled"))
                 };
 
                 res

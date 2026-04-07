@@ -94,9 +94,8 @@ impl DeepAgent {
         let mut stream = Box::pin(self.step_stream(user_input, agent_config));
         
         while let Some(res) = stream.next().await {
-            match res? {
-                AgentStepEvent::TextChunk(c) => full_content.push_str(&c),
-                _ => {}
+            if let AgentStepEvent::TextChunk(c) = res? {
+                full_content.push_str(&c);
             }
         }
         Ok(full_content)

@@ -107,7 +107,7 @@ impl Harness {
         }
 
         self.call_depth.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        res.map_err(Into::into)
+        res
     }
 
     /// Orchestrated Streaming Loop with Post-Hook Support.

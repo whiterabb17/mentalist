@@ -2,22 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Central configuration for the Mentalist agentic framework.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct MentalistConfig {
     pub agent: AgentConfig,
     pub executor: ExecutorConfig,
     pub security: SecurityConfig,
 }
 
-impl Default for MentalistConfig {
-    fn default() -> Self {
-        Self {
-            agent: AgentConfig::default(),
-            executor: ExecutorConfig::default(),
-            security: SecurityConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
@@ -107,7 +98,7 @@ impl MentalistConfig {
     pub async fn from_file(path: impl AsRef<std::path::Path>) -> crate::error::Result<Self> {
         let path = path.as_ref();
         let content = tokio::fs::read_to_string(path).await?;
-        let config: Self = if path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
+        let config: Self = if path.extension().is_some_and(|e| e == "yaml" || e == "yml") {
             serde_yaml::from_str(&content).map_err(|e| crate::error::MentalistError::ConfigError(e.to_string()))?
         } else {
             serde_json::from_str(&content).map_err(|e| crate::error::MentalistError::ConfigError(e.to_string()))?
