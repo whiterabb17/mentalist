@@ -1,95 +1,102 @@
-# Mentalist (v0.3.1)
+# Mentalist: Cognitive AI Agent Runtime
 
-The **Mentalist** is a high-performance, production-grade execution environment for autonomous agents in Rust. It implements the **Agent = Model + Harness** paradigm, providing the infrastructure to make LLM-based agents reliable, stateful, and context-aware through the integrated **MindPalace** memory ecosystem.
+Mentalist is a production-grade cognitive runtime for autonomous AI agents, powered by the **MindPalace** memory ecosystem. It implements a multi-phase cognitive loop designed for safety, scalability, and deep reasoning.
 
-## 🚀 Key Pillars
+## 🚀 Key Features
 
-### 1. Hardened & Secure Execution Lifecycle
-The harness provides a strict Interceptor pattern integrated with the resilient MindPalace pipeline. Every turn is protected by:
-- **`CommandValidator`**: Multi-layer security including command whitelisting, shell injection protection, and strict path traversal guards, now with runtime execution limits.
-- **`is_critical` Policy**: Enhanced middleware safety where non-critical failures (like logging or planning) do not abort the core agent reasoning loop.
-- **Structured Error Handling**: Categorized tool errors (Transient, Permission Denied, Tool Not Found, Security Violation) with exponential backoff retry logic, wrapped in a unified `MentalistError` framework.
+*   **Multi-Phase Cognitive Loop**: Orchestrates `PLAN -> EXECUTE -> CRITIQUE -> STORE -> ADAPT` cycles for robust goal achievement. Each phase is independently verifiable and retry-aware.
+*   **Parallel Execution Engine**: Uses a Directed Acyclic Graph (DAG) based `TaskGraph` to resolve independent tasks in parallel using `tokio`, maximizing performance for complex agentic workflows.
+*   **Security Gates**: Capability-based security engine (`SecurityEngine`) with granular tool allowlisting, prompt injection sanitization, and execution sandboxing.
+*   **MindPalace Integration**: Deeply integrated with the MindPalace 7-layer memory architecture for persistent context, semantic fact-based reasoning, and long-term skill storage.
+*   **Unified Tool Interface**: Standardized `Tool` and `Skill` traits for seamless integration of MCP (Model Context Protocol) servers and internal logic.
+*   **Real-time Observability**: Stream core execution events via `RuntimeEvent` for TUI/Web UI monitoring, with full tracing support.
 
-### 2. Resilience & Stability Pillar
-The **DeepAgent** handles all state lifecycle through the **ResilientMemoryController**.
-- **JSON Auto-Fixer**: Heuristic recovery for malformed LLM tool arguments (balances unclosed braces and fixes trailing commas).
-- **Context Management**: Automatic context optimization and compaction triggered when history reaches configurable bounds (default 50 items).
-- **Infinite Cycle Protection**: Built-in guardrails against cyclical tool patterns (max 20 calls per turn) to prevent resource exhaustion.
-- **Thread-Safe Persistence**: Mutex-guarded resilient state saving using atomic temp-file swaps.
+## 🏗 Architecture
 
-### 3. Explicit Planning (TODO.md)
-Adopts the "Planning" pillar. The `TodoMiddleware` ensures the agent maintains objective-coherence by automatically injecting and persisting a stateful `TODO.md` file, with hardened IO error handling for reliability.
+Mentalist is organized into modular functional areas:
 
-### 4. Sandboxed Isolation
-Includes a `SandboxedExecutor` for high-security tool execution:
-- **Wasmtime (Natively Secure)**: Capability-based security for running tools like Python via Wasm with strict filesystem mounting.
-- **Docker (Native `bollard`)**: Full container isolation with verified resource limits (CPU/Memory memory validation post-creation).
-- **POSIX Permission Security**: Execution-bit validation for skill scripts to ensure diagnostic clarity.
+*   **`core`**: The `AgentRuntime` orchestrator managing the cognitive loop.
+*   **`cognition`**: Planning and Critique engines powered by the `mem-planner` crate.
+*   **`execution`**: The `TaskGraph` engine for dependency resolution and `MultiExecutor` for tool dispatch.
+*   **`memory`**: Unified adapter for MindPalace `Brain`, `Retriever`, and `MindPalaceMemory` implementations.
+*   **`security`**: Policy-based guardrails, capability management, and sanitization logic.
+*   **`tools`**: Registry and adapters for MCP servers (filesystem, firecrawl, duckduckgo, etc.).
+*   **`llm`**: Provider-agnostic LLM interface supporting Anthropic, OpenAI, Gemini, and Ollama.
 
-### 5. Multi-Protocol Tool Support
-Exposes a flexible executor architecture:
-- **MCP (Model Context Protocol)**: Direct integration with domestic and remote MCP servers via the `McpExecutor`. Supports standard-compliant `initialize` handshakes and JSON-RPC.
-- **Skills System**: A filesystem-based tool discovery system with validated script execution (Python, JS, Shell).
-- **MultiExecutor & Dynamic Loading**: Advanced tool routing with registration collision detection. The `DynamicExecutorLoader` enables seamless instantiation from a unified `MentalistConfig`.
-- **Sensitive Data Redaction**: Automatic masking of `api_key`, `token`, and `secret` values in diagnostic logs.
+## 🔮 Standardized API (Aggregator)
 
-## 🛠️ Usage Example (v1.0.0)
+Mentalist v0.3.5 serves as a comprehensive aggregator for MindPalace crates, simplifying the dependency stack for downstream agents like **Gypsy**.
 
-Integrated with the hardened MindPalace memory architecture:
-
+### Common Imports
 ```rust
-use mentalist::{Harness, DeepAgent, DeepAgentState, StepConfig};
-use mentalist::executor::{SandboxedExecutor, ExecutionMode};
-use mem_resilience::{ResilientMemoryController, CircuitBreaker};
-use brain::Brain;
-use std::sync::Arc;
+use mentalist::{
+    AgentRuntime, RuntimeEvent, ExecutionLimits,
+    MindPalacePlanner, MindPalaceMemory, SecurityEngine,
+    MindPalaceLLM, ToolRegistry, Policy
+};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 1. Initialize the Hardened Memory Brain
-    let brain = Arc::new(Brain::new(mem_core::MindPalaceConfig::default(), None, None));
-    
-    // 2. Setup the Resilience Controller
-    let controller = Arc::new(ResilientMemoryController::new(
-        brain, 
-        storage, 
-        5 // failure threshold
-    ));
-
-    // 3. Initialize the DeepAgent with Sandboxed Execution
-    let executor = Arc::new(SandboxedExecutor::new(
-        ExecutionMode::Docker { image: "python:3.10-slim".into() },
-        PathBuf::from("./workdir"),
-        None
-    )?);
-    
-    let config = AgentConfig {
-        max_turns: 15,
-        max_tool_calls_per_turn: 10,
-        ..Default::default()
-    };
-    
-    let mut agent = DeepAgent::new(
-        harness, 
-        state, 
-        executor, 
-        controller,
-        None, // scheduler
-    );
-    
-    // 4. Integrated Step with Resilience & Planning
-    let response = agent.step("Initiate project architecture audit").await?;
-    println!("Agent Analysis: {}", response);
-    
-    Ok(())
-}
+// Re-exports from mem-core
+use mentalist::{ModelProvider, EmbeddingProvider, TokenCounter, Context};
 ```
 
-## 📂 Repository Structure
+### Compatibility Bridge (v0.3.3 -> v0.3.5)
+To assist with migrations, Mentalist includes a compatibility layer for legacy patterns:
+- `mentalist::executor::MultiExecutor`: Wraps the new `ToolRegistry`.
+- `mentalist::DeepAgentState`: Legacy alias for `AgentState`.
+- `mentalist::mcp::McpExecutor`: Re-export for standard MCP adapters.
 
-- `mentalist`: High-level agent harness and executor.
-- `mindpalace`: 7-layer memory ecosystem (HNSW, GraphDB, Adaptive TTL).
+## 🏁 Execution Observability
 
----
+The `AgentRuntime::run` method accepts an optional `UnboundedSender<RuntimeEvent>` to provide real-time updates:
 
-*Part of the MindPalace Agent Memory ecosystem.*
+- `RuntimeEvent::Status(String)`: High-level phase updates (e.g., "Planning...", "Executing...").
+- `RuntimeEvent::TextChunk(String)`: Incremental output from the LLM.
+- `RuntimeEvent::ToolStarted(String)`: Notification that a tool execution has begun.
+- `RuntimeEvent::ToolFinished(String, String, bool)`: Results and success status of tool calls.
+- `RuntimeEvent::MetricUpdate`: Latency and token utilization statistics per step.
+
+## 📦 Usage
+
+Add Mentalist to your `Cargo.toml`:
+
+```toml
+[dependencies]
+mentalist = { git = "https://github.com/whiterabb17/mentalist.git", version = "0.3.5" }
+```
+
+### Initializing the Runtime
+```rust
+let runtime = Arc::new(AgentRuntime {
+    planner: Arc::new(MindPalacePlanner::new(planner_engine)),
+    executor: Arc::new(Executor::new(registry)),
+    memory: Arc::new(MindPalaceMemory::new(brain, retriever)),
+    llm: Arc::new(MindPalaceLLM::new(provider)),
+    tools: registry,
+    security: Arc::new(SecurityEngine::new(Policy::default())),
+    critic: Arc::new(DefaultCritic),
+    limits: ExecutionLimits::default(),
+});
+```
+
+## 🏁 Getting Started
+
+### Prerequisites
+
+*   Rust 1.75+
+*   Ollama (for local LLM support)
+
+### Run the Demo
+
+```bash
+cargo run --example full_system_demo
+```
+
+## 🧪 Testing
+
+```bash
+cargo test
+```
+
+## 📄 License
+
+MIT

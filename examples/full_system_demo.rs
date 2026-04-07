@@ -1,146 +1,60 @@
-use clap::Parser;
-use colored::*;
-use mentalist::{Harness, Request, Response, ResponseChunk, DeepAgent, DeepAgentState, ModelProvider};
-use mentalist::middleware::{MindPalaceMiddleware, todo::TodoMiddleware};
-// removed unused brain::Brain
-use mem_core::{Context, FileStorage, EmbeddingProvider, LlmClient, TokenCounter};
-use mem_resilience::ResilientMemoryController;
+use mentalist::core::{AgentRuntime, ExecutionLimits};
+use mentalist::cognition::MindPalacePlanner;
+use mentalist::execution::executor::Executor;
+use mentalist::memory::MindPalaceMemory;
+use mentalist::tools::ToolRegistry;
+use mentalist::security::{SecurityEngine, Policy};
+use mentalist::llm::MindPalaceLLM;
+use mentalist::telemetry::init_telemetry;
 use std::sync::Arc;
-// removed unused std::path::PathBuf
-use anyhow::Result;
-use async_trait::async_trait;
-// removed unused sleep, Duration
-use futures_util::stream::BoxStream;
-
-#[derive(Parser)]
-struct Args {
-    #[arg(short, long)]
-    interactive: bool,
-}
-
-pub struct MockProvider;
-
-#[async_trait]
-impl ModelProvider for MockProvider {
-    async fn complete(&self, req: Request) -> Result<Response> {
-        Ok(Response { content: format!("Mock result for: {}", req.prompt), tool_calls: vec![] })
-    }
-
-    async fn stream_complete(&self, _req: Request) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
-        let stream = async_stream::try_stream! {
-            yield ResponseChunk { 
-                content_delta: Some("Streaming... ".to_string()), 
-                tool_call_delta: None, 
-                usage: None,
-                is_final: false 
-            };
-            yield ResponseChunk { 
-                content_delta: Some("Done!".to_string()), 
-                tool_call_delta: None, 
-                usage: None,
-                is_final: true 
-            };
-        };
-        Ok(Box::pin(stream))
-    }
-}
-
-#[async_trait]
-impl LlmClient for MockProvider {
-    async fn completion(&self, _prompt: &str) -> Result<String> {
-        Ok("Mock completion result.".to_string())
-    }
-}
-
-pub struct MockEmbeddingProvider;
-
-#[async_trait]
-impl EmbeddingProvider for MockEmbeddingProvider {
-    async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
-        Ok(vec![0.0; 384]) // Mocked 384-dim vector
-    }
-}
-
-pub struct MockTokenCounter;
-
-impl TokenCounter for MockTokenCounter {
-    fn count_tokens(&self, text: &str) -> usize {
-        text.len() / 4
-    }
-}
+use brain::Brain;
+use mem_core::{MindPalaceConfig, Context};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let _args = Args::parse();
-    
-    println!("\n{}", "===================================================".bold().cyan());
-    println!("{}", "   🧠 MINDPALACE & MENTALIST: 7-LAYER DEMO 🧠   ".bold().cyan());
-    println!("{}\n", "===================================================".bold().cyan());
-    
-    // 0. Infrastructure Setup
-    let storage_root = std::env::current_dir()?.join(".agent/storage");
-    let storage = FileStorage::new(storage_root.clone());
-    let mock_llm = Arc::new(MockProvider);
-    let mock_embeddings = Arc::new(MockEmbeddingProvider);
-    let mock_tokens = Arc::new(MockTokenCounter);
-    let session_id = "demo_sota_001".to_string();
+async fn main() -> anyhow::Result<()> {
+    // 1. Initialize Telemetry
+    init_telemetry();
+    tracing::info!("Starting Mentalist v0.3.3 Demo");
 
-    // 1. Initialize SOTA Hardened Middleware (7-Layers!)
-    let mp_middleware = MindPalaceMiddleware::hardened(
-        storage.clone(),
-        mock_llm.clone(),
-        mock_embeddings.clone(),
-        mock_tokens.clone(),
-        session_id.clone(),
-        384,
-        storage_root.join("vault"),
-        None, // config_override: use defaults
-    );
+    // 2. Setup LLM Provider (via Ollama)
+    let ollama = Arc::new(mem_core::OllamaProvider::new("http://localhost:11434".into(), "qwen2.5-coder:7b".into(), "".into(), None));
+    let llm = Arc::new(MindPalaceLLM::new(ollama.clone()));
 
-    // 2. Resilience Setup
-    let brain = Arc::clone(&mp_middleware.brain);
-    let memory_controller = Arc::new(ResilientMemoryController::new(
-        brain,
-        storage.clone(),
-        3 // Failure threshold
-    ));
+    // 3. Setup MindPalace Memory Backend
+    let brain = Arc::new(Brain::new(MindPalaceConfig::default(), None, None));
+    let storage = mem_core::FileStorage::new(std::path::PathBuf::from(".mindpalace"));
+    let retriever = mem_retriever::MemoryRetriever::legacy(storage, ollama.clone(), ollama.clone());
+    let memory = Arc::new(MindPalaceMemory::new(brain.clone(), retriever));
 
-    // 3. Harness & Middlewares
-    let mut harness = Harness::new(Arc::new(MockProvider));
-    harness.add_middleware(Arc::new(mp_middleware));
-    harness.add_middleware(Arc::new(TodoMiddleware::new(std::env::current_dir()?.join(".agent/todo.md"))));
-    
-    // 4. Initial Agent Configuration
-    let state = DeepAgentState {
-        session_id,
-        context: Arc::new(Context { items: vec![] }),
-        sandbox_root: std::env::current_dir()?,
+    // 4. Setup Tools & Security
+    let tools = Arc::new(ToolRegistry::new());
+    let security = Arc::new(SecurityEngine::new(Policy {
+        allowed_capabilities: vec![],
+        tool_allowlist: vec![],
+    }));
+
+    // 5. Build Cognitive Core
+    let planner = Arc::new(MindPalacePlanner::new(Arc::new(mem_planner::LlmPlanner::new(ollama))));
+    let executor = Arc::new(Executor::new(Arc::clone(&tools)));
+    let critic = Arc::new(mentalist::cognition::DefaultCritic);
+
+    let runtime = AgentRuntime {
+        planner,
+        executor,
+        memory,
+        llm,
+        tools,
+        security,
+        critic,
+        limits: ExecutionLimits { max_steps: 10, timeout_seconds: 600 },
     };
-    
-    let executor = Arc::new(mentalist::executor::SandboxedExecutor::new(
-        mentalist::executor::ExecutionMode::Local,
-        std::env::current_dir()?,
-        Some(std::env::current_dir()?) // Local mode needs explicit vault
-    ).expect("Failed to create executor"));
 
-    let mut agent = DeepAgent::new(harness, state, executor, memory_controller, None);
+    // 6. Run Mission
+    let goal = "Analyze the repository for modularity gaps and propose a refactoring plan.";
+    let result = runtime.run(goal, Context::default(), None).await?;
 
-    println!("{}", ">>> Starting Hardened Verification Loop...".bold().white());
-    
-    let script = vec![
-        "Analyze the project structure and remember we use 7-layer memory.", // Should trigger Reflection
-        "Update the plan for total integration.",
-    ];
+    println!("--- MISSION COMPLETE ---");
+    println!("Final Result: {}", result);
 
-    for (i, prompt) in script.into_iter().enumerate() {
-        println!("\n{}: {}", format!("TURN {}", i + 1).on_blue().white().bold(), prompt.bold());
-        let response = agent.step(prompt.to_string()).await?;
-        println!("{}: {}", " 🤖 Agent Response".bold().cyan(), response);
-    }
-
-    println!("\n{}", "===================================================".bold().green());
-    println!("{}", "   ✅ HARDENED SOTA DEMO COMPLETED SUCCESSFULLY ✅   ".bold().green());
-    println!("{}\n", "===================================================".bold().green());
-    
     Ok(())
 }

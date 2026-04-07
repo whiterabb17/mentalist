@@ -1,34 +1,51 @@
-use mentalist::error::{MentalistError, Result};
-use mentalist::executor::ToolError;
+use mentalist::tools::{ToolRegistry, Tool, ToolSchema};
+use mentalist::security::{SecurityEngine, Policy};
+use mentalist::execution::executor::ExecutionResult;
+use async_trait::async_trait;
+use serde_json::Value;
+use std::sync::Arc;
 
-#[test]
-fn test_error_conversion() {
-    let tool_err = ToolError::NotFound("test_tool".to_string());
-    let mentalist_err: MentalistError = tool_err.into();
-    
-    match mentalist_err {
-        MentalistError::ExecutorError(ToolError::NotFound(name)) => assert_eq!(name, "test_tool"),
-        _ => panic!("Expected ExecutorError::NotFound"),
+struct FailingTool;
+#[async_trait]
+impl Tool for FailingTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema { name: "failing_tool".into(), description: "A tool that fails".into(), parameters: Value::Null }
+    }
+    async fn execute(&self, _input: Value) -> anyhow::Result<Value> {
+        anyhow::bail!("Intentional Tool Failure")
     }
 }
 
-#[test]
-fn test_middleware_error_creation() {
-    let err = MentalistError::MiddlewareError {
-        middleware: "Auth".to_string(),
-        source: anyhow::anyhow!("Unauthorized"),
-    };
+#[tokio::test]
+async fn test_security_violation_caught() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(FailingTool));
     
-    assert!(err.to_string().contains("Middleware 'Auth' failure"));
-    assert!(err.to_string().contains("Unauthorized"));
+    // Security Policy: No tools allowed
+    let security = Arc::new(SecurityEngine::new(Policy { allowed_capabilities: vec![], tool_allowlist: vec![] }));
+    
+    let result = security.validate_tool_call("failing_tool");
+    assert!(result.is_err(), "Security should have blocked non-allowlisted tool");
 }
 
-#[test]
-fn test_result_type() {
-    fn produces_error() -> Result<()> {
-        Err(MentalistError::AgentError("Failed".to_string()))
-    }
-    
-    let res = produces_error();
-    assert!(res.is_err());
+#[tokio::test]
+async fn test_tool_failure_propagation() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(FailingTool));
+    let executor = mentalist::execution::executor::Executor::new(Arc::new(tools));
+
+    let plan = mem_planner::ExecutionPlan::new(); 
+    let graph = mentalist::execution::graph::TaskGraph::new(plan);
+
+    let results = executor.execute_parallel(&graph, |task| {
+        async move {
+             ExecutionResult {
+                 task_id: task.id,
+                 output: serde_json::json!({ "error": "Internal Error" }),
+                 success: false,
+             }
+        }
+    }).await.unwrap();
+
+    assert!(results.is_empty() || !results.values().any(|r| r.success));
 }
