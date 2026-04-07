@@ -16,6 +16,7 @@ impl Tool for Skill {
             name: self.name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
+            source: "builtin".to_string(),
         }
     }
 
