@@ -22,7 +22,11 @@ pub enum RuntimeEvent {
     MetricUpdate {
         step: usize,
         phase: String,
+        input_tokens: usize,
+        output_tokens: usize,
+        context_size: usize,
     },
+    AwaitingApproval(mem_planner::ExecutionPlan),
 }
 
 pub struct AgentRuntime {
@@ -41,40 +45,118 @@ impl AgentRuntime {
         &self, 
         goal: &str, 
         ctx: Context, 
-        tx: Option<UnboundedSender<RuntimeEvent>>
+        tx: Option<UnboundedSender<RuntimeEvent>>,
+        mut approval_rx: Option<tokio::sync::mpsc::Receiver<bool>>
     ) -> anyhow::Result<String> {
+        let mut ctx = ctx; 
         let mut step = 0;
+        let mut total_input_tokens = 0;
+        let mut total_output_tokens = 0;
         let mut completed = false;
+
+        let send_metrics = |step: usize, phase: &str, tx: &Option<UnboundedSender<RuntimeEvent>>, input: usize, output: usize, ctx: &Context| {
+            if let Some(ref tx) = tx {
+                let context_size = ctx.items.iter().map(|i| mem_core::estimate_tokens(&i.content)).sum();
+                let _ = tx.send(RuntimeEvent::MetricUpdate { 
+                    step, 
+                    phase: phase.into(), 
+                    input_tokens: input, 
+                    output_tokens: output, 
+                    context_size 
+                });
+            }
+        };
 
         while step < self.limits.max_steps && !completed {
             step += 1;
             
+            send_metrics(step, "PLAN", &tx, total_input_tokens, total_output_tokens, &ctx);
             if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "PLAN".into() });
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Planning...", step)));
+            }
+            
+            // 0. SUMMARIZE CONTEXT (if needed)
+            let current_tokens: usize = ctx.items.iter().map(|i| mem_core::estimate_tokens(&i.content)).sum();
+            if current_tokens > 24000 && ctx.items.len() > 10 {
+                tracing::info!(current_tokens, "Context threshold exceeded, summarization triggered");
+                if let Some(ref tx) = tx {
+                    let _ = tx.send(RuntimeEvent::Status("Deep memory compression...".into()));
+                }
+                ctx = self.summarize_context(ctx).await?;
             }
             
             tracing::info!(step, goal, "Phase: PLAN");
             
             // 1. PLAN
-            let mut plan = self.planner.create_plan(goal, &ctx, None).await?;
+            let tools = self.tools.list_tools().await;
+            let mut plan = self.planner.create_plan(goal, &ctx, tools, None).await?;
+            if let Some(usage) = &plan.usage {
+                total_input_tokens += usage.prompt_tokens as usize;
+                total_output_tokens += usage.completion_tokens as usize;
+            }
+            tracing::info!(tasks = ?plan.tasks.keys().collect::<Vec<_>>(), "Initial plan");
+
+            if plan.requires_approval {
+                if let Some(ref tx) = tx {
+                    let _ = tx.send(RuntimeEvent::AwaitingApproval(plan.clone()));
+                }
+                if let Some(ref mut rx) = approval_rx {
+                    match rx.recv().await {
+                        Some(true) => tracing::info!("Plan approved by user"),
+                        _ => {
+                            tracing::info!("Plan rejected or channel closed");
+                            completed = true;
+                            continue;
+                        }
+                    }
+                } else {
+                    tracing::warn!("Plan requires approval but no approval_rx provided. Auto-approving for headless mode.");
+                }
+            }
+
+            if !plan.content.is_empty() {
+                if let Some(ref tx) = tx {
+                    let _ = tx.send(RuntimeEvent::TextChunk(plan.content.clone()));
+                }
+            }
             
-            // Fallback
+            // Fallback & Conversational logic
             if plan.tasks.is_empty() {
-                if let Some(last_msg) = ctx.items.last() {
+                // 1. Try from plan.content (raw LLM response for current step)
+                let fallback_nodes = self.parse_fallback_tool_calls(&plan.content);
+                if !fallback_nodes.is_empty() {
+                    tracing::info!(step, "Using fallback parser: {} tools found in plan.content", fallback_nodes.len());
+                    for node in fallback_nodes {
+                        plan.tasks.insert(node.id.clone(), node);
+                    }
+                } else if let Some(last_msg) = ctx.items.last() {
+                    // 2. Try from last message in context (e.g. if the user provided multiple tool calls)
                     let fallback_nodes = self.parse_fallback_tool_calls(&last_msg.content);
                     if !fallback_nodes.is_empty() {
-                        tracing::info!(step, "Using fallback parser results: {} tools found", fallback_nodes.len());
+                        tracing::info!(step, "Using fallback parser: {} tools found in last context message", fallback_nodes.len());
                         for node in fallback_nodes {
                             plan.tasks.insert(node.id.clone(), node);
                         }
                     }
                 }
+                
+                // 3. Still empty? If we have content, it's conversational
+                if plan.tasks.is_empty() && !plan.content.is_empty() {
+                    send_metrics(step, "PLAN_COMPLETE", &tx, total_input_tokens, total_output_tokens, &ctx);
+                    completed = true;
+                    continue; // Skip execution phase
+                }
+            }
+            
+            if plan.tasks.is_empty() {
+                tracing::warn!("Execution plan is empty and no fallback tool calls found for goal: '{}'", goal);
+                completed = true;
+                continue;
             }
 
             // 2. EXECUTE
+            send_metrics(step, "EXECUTE", &tx, total_input_tokens, total_output_tokens, &ctx);
             if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "EXECUTE".into() });
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Executing tasks...", step)));
             }
             
@@ -128,18 +210,20 @@ impl AgentRuntime {
             }).await?;
 
             // 3. CRITIQUE
+            send_metrics(step, "CRITIQUE", &tx, total_input_tokens, total_output_tokens, &ctx);
             if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "CRITIQUE".into() });
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Critiquing results...", step)));
             }
             
             tracing::info!(step, "Phase: CRITIQUE");
-            let feedback = self.critic.evaluate(&results).await?;
+            let feedback = self.critic.evaluate(goal, &ctx, &results).await?;
+            
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::Status(format!("Critic: {}", feedback.critique)));
+            }
             
             // 4. STORE MEMORY
-            if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "STORE".into() });
-            }
+            send_metrics(step, "STORE", &tx, total_input_tokens, total_output_tokens, &ctx);
             
             tracing::info!(step, "Phase: STORE MEMORY");
             for (_, res) in results {
@@ -151,17 +235,41 @@ impl AgentRuntime {
             }
 
             // 5. ADAPT
+            send_metrics(step, "ADAPT", &tx, total_input_tokens, total_output_tokens, &ctx);
             if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::MetricUpdate { step, phase: "ADAPT".into() });
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Adapting plan...", step)));
             }
             
             tracing::info!(step, feedback = feedback.critique, "Phase: ADAPT");
             if feedback.score > 0.9 && !feedback.suggests_retry {
                 completed = true;
+            } else if feedback.suggests_retry {
+                // If the critic suggests retry, we re-plan with tools
+                let tools = self.tools.list_tools().await;
+                plan = self.planner.create_plan(goal, &ctx, tools, Some(&feedback.critique)).await?;
+                tracing::info!("Re-planned due to critic feedback");
             }
         }
 
+        // 6. FINAL SUMMARY
+        if let Some(ref tx) = tx {
+            let _ = tx.send(RuntimeEvent::Status("Finalizing report...".into()));
+        }
+        let tools = self.tools.list_tools().await;
+        let summary_plan = self.planner.create_plan(
+            &format!("Summarize the results of our steps to satisfy the original goal: {}", goal),
+            &ctx,
+            tools,
+            None
+        ).await?;
+        
+        if !summary_plan.content.is_empty() {
+             if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::TextChunk(summary_plan.content));
+            }
+        }
+
+        send_metrics(step, "COMPLETED", &tx, total_input_tokens, total_output_tokens, &ctx);
         if let Some(ref tx) = tx {
             let _ = tx.send(RuntimeEvent::Status("Goal completed.".into()));
         }
@@ -183,15 +291,21 @@ impl AgentRuntime {
             step += 1;
 
             // 1. PLAN
-            let plan_res = self.planner.create_plan(&goal, &ctx, None).await;
+            let tools = self.tools.list_tools().await;
+            let plan_res = self.planner.create_plan(&goal, &ctx, tools, None).await;
             let mut plan = match plan_res {
                 Ok(p) => p,
                 Err(e) => return Some((Err(e), (step, true, ctx, goal))),
             };
 
-            // Fallback
+            // Fallback & Conversational
             if plan.tasks.is_empty() {
-                if let Some(last_msg) = ctx.items.last() {
+                let fallback_nodes = self.parse_fallback_tool_calls(&plan.content);
+                if !fallback_nodes.is_empty() {
+                    for node in fallback_nodes {
+                        plan.add_task(node);
+                    }
+                } else if let Some(last_msg) = ctx.items.last() {
                     let fallback_nodes = self.parse_fallback_tool_calls(&last_msg.content);
                     for node in fallback_nodes {
                         plan.add_task(node);
@@ -200,6 +314,9 @@ impl AgentRuntime {
             }
 
             if plan.tasks.is_empty() {
+                if !plan.content.is_empty() {
+                    return Some((Ok(RuntimeEvent::TextChunk(plan.content)), (step, true, ctx, goal)));
+                }
                 return Some((Ok(RuntimeEvent::Status("No more tasks planned.".into())), (step, true, ctx, goal)));
             }
 
@@ -246,7 +363,7 @@ impl AgentRuntime {
             };
 
             // 3. CRITIQUE
-            let feedback_res = self.critic.evaluate(&results).await;
+            let feedback_res = self.critic.evaluate(&goal, &ctx, &results).await;
             let feedback = match feedback_res {
                 Ok(f) => f,
                 Err(e) => return Some((Err(e), (step, true, ctx, goal))),
@@ -305,5 +422,50 @@ impl AgentRuntime {
         }
 
         tasks
+    }
+
+    pub async fn summarize_context(&self, mut ctx: Context) -> anyhow::Result<Context> {
+        // Keep the goal and the last 4 messages intact
+        if ctx.items.len() <= 6 {
+            return Ok(ctx);
+        }
+
+        let to_summarize = &ctx.items[..ctx.items.len() - 4];
+        let history_text = to_summarize.iter()
+            .map(|i| format!("{:?}: {}", i.role, i.content))
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        let prompt = format!(
+            r#"Summarize the following conversation history into a dense, informative paragraph.
+Preserve all key facts, discovered information, and completed task results.
+
+### HISTORY ###
+{}
+
+### SUMMARY ###
+"#,
+            history_text
+        );
+
+        let req = crate::llm::LlmRequest {
+            prompt,
+            context: std::sync::Arc::new(Context::default()),
+            tools: vec![],
+        };
+
+        let response = self.llm.generate(req).await?;
+        
+        let mut new_items = vec![mem_core::MemoryItem {
+            role: mem_core::MemoryRole::System,
+            content: format!("### PREVIOUS CONTEXT SUMMARY ###\n{}", response.content),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            metadata: serde_json::json!({ "summarized": true }),
+        }];
+
+        new_items.extend(ctx.items.drain(ctx.items.len() - 4..));
+        ctx.items = new_items;
+
+        Ok(ctx)
     }
 }

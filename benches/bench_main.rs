@@ -28,7 +28,7 @@ impl mem_core::LlmClient for NoOpModel {
 #[async_trait]
 impl mem_core::ModelProvider for NoOpModel {
     async fn complete(&self, _req: Request) -> anyhow::Result<Response> {
-        Ok(Response { content: "ok".into(), tool_calls: vec![] })
+        Ok(Response { content: "ok".into(), tool_calls: vec![], usage: None })
     }
     async fn stream_complete(&self, _req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         Ok(Box::pin(stream::empty()))
@@ -38,7 +38,7 @@ impl mem_core::ModelProvider for NoOpModel {
 #[async_trait]
 impl LLMProvider for NoOpModel {
     async fn generate(&self, _req: Request) -> anyhow::Result<Response> {
-        Ok(Response { content: "ok".into(), tool_calls: vec![] })
+        Ok(Response { content: "ok".into(), tool_calls: vec![], usage: None })
     }
     async fn generate_stream(&self, _req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         Ok(Box::pin(stream::empty()))
@@ -190,7 +190,7 @@ fn bench_runtime_overhead(c: &mut Criterion) {
 
     c.bench_function("agent_runtime_1_step", |b| {
         b.to_async(&rt).iter(|| {
-            runtime.run("test goal", ctx.clone(), None)
+            runtime.run("test goal", ctx.clone(), None, None)
         })
     });
 }

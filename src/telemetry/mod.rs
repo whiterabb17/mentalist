@@ -7,7 +7,7 @@ pub fn init_telemetry() {
 #[instrument(skip(runtime, goal))]
 pub async fn trace_agent_run(runtime: &crate::AgentRuntime, goal: &str) -> anyhow::Result<String> {
     info!(goal, "Agent run starting");
-    let res = runtime.run(goal, mem_core::Context::default(), None).await?;
+    let res = runtime.run(goal, mem_core::Context::default(), None, None).await?;
     info!("Agent run finished");
     Ok(res)
 }

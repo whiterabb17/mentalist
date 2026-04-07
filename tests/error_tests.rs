@@ -9,7 +9,7 @@ struct FailingTool;
 #[async_trait]
 impl Tool for FailingTool {
     fn schema(&self) -> ToolSchema {
-        ToolSchema { name: "failing_tool".into(), description: "A tool that fails".into(), parameters: Value::Null }
+        ToolSchema { name: "failing_tool".into(), description: "A tool that fails".into(), parameters: Value::Null, source: "builtin".into() }
     }
     async fn execute(&self, _input: Value) -> anyhow::Result<Value> {
         anyhow::bail!("Intentional Tool Failure")
@@ -18,20 +18,23 @@ impl Tool for FailingTool {
 
 #[tokio::test]
 async fn test_security_violation_caught() {
-    let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(FailingTool));
-    
-    // Security Policy: No tools allowed
-    let security = Arc::new(SecurityEngine::new(Policy { allowed_capabilities: vec![], tool_allowlist: vec![] }));
-    
+    let tools = ToolRegistry::new();
+    tools.register(Arc::new(FailingTool)).await;
+
+    // Security Policy: Only "safe_tool" is allowed — failing_tool must be blocked
+    let security = Arc::new(SecurityEngine::new(Policy {
+        allowed_capabilities: vec![],
+        tool_allowlist: vec!["safe_tool".into()],
+    }));
+
     let result = security.validate_tool_call("failing_tool");
     assert!(result.is_err(), "Security should have blocked non-allowlisted tool");
 }
 
 #[tokio::test]
 async fn test_tool_failure_propagation() {
-    let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(FailingTool));
+    let tools = ToolRegistry::new();
+    tools.register(Arc::new(FailingTool)).await;
     let executor = mentalist::execution::executor::Executor::new(Arc::new(tools));
 
     let plan = mem_planner::ExecutionPlan::new(); 

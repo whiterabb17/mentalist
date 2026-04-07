@@ -4,6 +4,7 @@ use crate::execution::graph::TaskGraph;
 use mem_planner::{TaskId, TaskNode};
 use std::collections::{HashSet, HashMap};
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionResult {
     pub task_id: TaskId,
     pub output: serde_json::Value,

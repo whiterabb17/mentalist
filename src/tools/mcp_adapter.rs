@@ -31,7 +31,7 @@ impl McpServer {
             args,
             env: HashMap::new(),
             cwd: None,
-            initialization_timeout: std::time::Duration::from_secs(60),
+            initialization_timeout: std::time::Duration::from_secs(30),
             process: Arc::new(Mutex::new(None)),
             stdio: Arc::new(Mutex::new(None)),
             id_counter: AtomicI64::new(1),
@@ -82,13 +82,21 @@ impl McpServer {
             let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("Failed to open stdin"))?;
             let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("Failed to open stdout"))?;
 
-            let mut stdio_guard = self.stdio.lock().await;
-            *stdio_guard = Some((stdin, BufReader::new(stdout)));
+            {
+                let mut stdio_guard = self.stdio.lock().await;
+                *stdio_guard = Some((stdin, BufReader::new(stdout)));
+            }
             *process_guard = Some(child);
             
             // Initialization (initialize request)
-            drop(process_guard); // Release early
-            self.initialize_protocol().await?;
+            drop(process_guard); // Release process lock before network/IO call
+            
+            if let Err(e) = self.initialize_protocol().await {
+                tracing::error!(target: "mentalist::mcp", "[{}] MCP initialization failed: {}", self.name, e);
+                // Cleanup on failure
+                self.stop().await.ok();
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -227,63 +235,86 @@ impl Tool for McpTool {
 pub struct BuiltinMcp;
 
 impl BuiltinMcp {
-    pub fn filesystem(paths: Vec<String>, prefix: Option<&std::path::Path>) -> Result<McpServer> {
-        let mut args = if let Some(p) = prefix {
-            vec!["--prefix".to_string(), p.to_string_lossy().to_string()]
-        } else {
-            vec![]
-        };
-        args.extend(vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()]);
+    pub fn filesystem(paths: Vec<String>, root: Option<&std::path::Path>) -> Result<McpServer> {
+        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+        let mut args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
         args.extend(paths);
-        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
-        Ok(McpServer::new("filesystem".to_string(), cmd.to_string(), args).with_cwd(std::env::current_dir()?))
+        let mut server = McpServer::new("filesystem".to_string(), cmd.to_string(), args);
+        if let Some(p) = root {
+            // Run npx from the server's own isolated install directory
+            let server_dir = p.join("filesystem");
+            server = server.with_cwd(server_dir);
+        } else {
+            server = server.with_cwd(std::env::current_dir()?);
+        }
+        Ok(server)
     }
 
-    pub fn duckduckgo(prefix: Option<&std::path::Path>) -> Result<McpServer> {
-        let mut args = if let Some(p) = prefix {
-            vec!["--prefix".to_string(), p.to_string_lossy().to_string()]
-        } else {
-            vec![]
-        };
-        args.extend(vec!["-y".to_string(), "duckduckgo-mcp-server".to_string()]);
+    pub fn duckduckgo(root: Option<&std::path::Path>) -> Result<McpServer> {
         let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
-        Ok(McpServer::new("duckduckgo".to_string(), cmd.to_string(), args).with_cwd(std::env::current_dir()?))
+        let args = vec!["-y".to_string(), "duckduckgo-mcp-server".to_string()];
+        let mut server = McpServer::new("duckduckgo".to_string(), cmd.to_string(), args);
+        if let Some(p) = root {
+            let server_dir = p.join("duckduckgo");
+            server = server.with_cwd(server_dir);
+        } else {
+            server = server.with_cwd(std::env::current_dir()?);
+        }
+        Ok(server)
     }
 
-    pub fn firecrawl(api_key: String, prefix: Option<&std::path::Path>) -> Result<McpServer> {
-        let mut args = if let Some(p) = prefix {
-            vec!["--prefix".to_string(), p.to_string_lossy().to_string()]
-        } else {
-            vec![]
-        };
-        args.extend(vec!["-y".to_string(), "firecrawl-mcp".to_string()]);
+    pub fn firecrawl(api_key: String, root: Option<&std::path::Path>) -> Result<McpServer> {
+        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+        let args = vec!["-y".to_string(), "firecrawl-mcp".to_string()];
         let mut env = HashMap::new();
         env.insert("FIRECRAWL_API_KEY".to_string(), api_key);
-        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
-        Ok(McpServer::new("firecrawl".to_string(), cmd.to_string(), args).with_env(env).with_cwd(std::env::current_dir()?))
+        let mut server = McpServer::new("firecrawl".to_string(), cmd.to_string(), args).with_env(env);
+        if let Some(p) = root {
+            let server_dir = p.join("firecrawl");
+            server = server.with_cwd(server_dir);
+        } else {
+            server = server.with_cwd(std::env::current_dir()?);
+        }
+        Ok(server)
     }
 
+    /// Installs a package into its own isolated subdirectory under `root`.
+    /// The directory name is derived consistently with the factory methods:
+    ///   `@modelcontextprotocol/server-filesystem` → `<root>/filesystem/`
+    ///   `duckduckgo-mcp-server`                   → `<root>/duckduckgo/`
+    ///   `firecrawl-mcp`                           → `<root>/firecrawl/`
     pub async fn ensure_mcp_installed(root: &std::path::Path, package: &str) -> Result<()> {
-        if !root.exists() {
-            std::fs::create_dir_all(root)?;
+        let dir_name = match package {
+            "@modelcontextprotocol/server-filesystem" => "filesystem",
+            "duckduckgo-mcp-server" => "duckduckgo",
+            "firecrawl-mcp" => "firecrawl",
+            other => other,
+        };
+        let server_dir = root.join(dir_name);
+        if !server_dir.exists() {
+            std::fs::create_dir_all(&server_dir)?;
         }
-        let node_modules = root.join("node_modules");
-        let pkg_path = node_modules.join(package);
-        if !pkg_path.exists() {
-            tracing::info!("Installing internal MCP: {} into {:?}", package, root);
-            let npm_cmd = if cfg!(target_os = "windows") { "npm.cmd" } else { "npm" };
-            let status = Command::new(npm_cmd)
-                .arg("install")
-                .arg("--prefix")
-                .arg(root)
-                .arg("--no-package-lock")
-                .arg("--no-save")
-                .arg(package)
-                .status()
-                .await?;
-            if !status.success() {
-                anyhow::bail!("Failed to install MCP package: {}", package);
-            }
+        let node_modules = server_dir.join("node_modules");
+        // Skip if already installed
+        if node_modules.exists()
+            && std::fs::read_dir(&node_modules)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        tracing::info!("Installing MCP package '{}' into {:?}", package, server_dir);
+        let npm_cmd = if cfg!(target_os = "windows") { "npm.cmd" } else { "npm" };
+        let status = Command::new(npm_cmd)
+            .arg("install")
+            .arg("--no-package-lock")
+            .arg("--no-save")
+            .arg(package)
+            .current_dir(&server_dir)
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("Failed to install MCP package '{}' into {:?}", package, server_dir);
         }
         Ok(())
     }

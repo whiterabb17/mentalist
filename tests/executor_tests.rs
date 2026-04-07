@@ -12,7 +12,7 @@ struct MockTool;
 #[async_trait]
 impl Tool for MockTool {
     fn schema(&self) -> ToolSchema {
-        ToolSchema { name: "mock".into(), description: "mock".into(), parameters: Value::Null }
+        ToolSchema { name: "mock".into(), description: "mock".into(), parameters: Value::Null, source: "builtin".into() }
     }
     async fn execute(&self, _input: Value) -> anyhow::Result<Value> {
         Ok(serde_json::json!({ "result": "success" }))
@@ -22,8 +22,8 @@ impl Tool for MockTool {
 #[tokio::test]
 async fn test_parallel_executor_complex_dag() {
     let call_count = Arc::new(AtomicUsize::new(0));
-    let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(MockTool));
+    let tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool)).await;
     let executor = Executor::new(Arc::new(tools));
 
     let mut plan = ExecutionPlan::new();
