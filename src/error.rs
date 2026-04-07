@@ -12,7 +12,7 @@ pub enum MentalistError {
     #[error("Agent error: {0}")]
     AgentError(String),
 
-    #[error("Middleware error in {middleware}: {source}")]
+    #[error("Middleware '{middleware}' failure: {source}")]
     MiddlewareError {
         middleware: String,
         source: anyhow::Error,

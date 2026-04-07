@@ -19,7 +19,7 @@ fn test_middleware_error_creation() {
         source: anyhow::anyhow!("Unauthorized"),
     };
     
-    assert!(err.to_string().contains("Middleware error in Auth"));
+    assert!(err.to_string().contains("Middleware 'Auth' failure"));
     assert!(err.to_string().contains("Unauthorized"));
 }
 
