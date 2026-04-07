@@ -12,10 +12,12 @@ pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+    pub source: String,
 }
 
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
     async fn execute(&self, input: Value) -> anyhow::Result<Value>;
+    fn source(&self) -> String { "builtin".to_string() }
 }

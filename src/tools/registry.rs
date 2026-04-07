@@ -24,7 +24,16 @@ impl ToolRegistry {
 
     pub async fn list_tools(&self) -> Vec<ToolSchema> {
         let guard = self.tools.lock().await;
-        guard.values().map(|t| t.schema()).collect()
+        guard.values().map(|t| {
+            let mut schema = t.schema();
+            schema.source = t.source();
+            schema
+        }).collect()
+    }
+
+    pub async fn unregister_by_prefix(&self, prefix: &str) {
+        let mut guard = self.tools.lock().await;
+        guard.retain(|_, t| t.source() != prefix);
     }
 }
 

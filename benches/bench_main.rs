@@ -88,6 +88,7 @@ impl Tool for TestTool {
             name: "test_tool".into(),
             description: "test tool description".into(),
             parameters: serde_json::json!({}),
+            source: "builtin".into(),
         }
     }
     async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {

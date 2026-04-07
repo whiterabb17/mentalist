@@ -60,21 +60,30 @@ pub mod executor {
             Self { registry: Arc::new(ToolRegistry::new()) }
         }
 
-        pub async fn add_executor(&self, _name: String, server: Arc<McpServer>) {
+        pub async fn add_executor(&self, name: String, server: Arc<McpServer>) -> anyhow::Result<()> {
             match server.list_tools().await {
                 Ok(tools) => {
-                    for (name, desc, params) in tools {
+                    for (t_name, desc, params) in tools {
                         let tool = McpTool {
                             server: Arc::clone(&server),
-                            name,
+                            source: name.clone(),
+                            name: t_name,
                             description: desc,
                             parameters: params,
                         };
                         self.registry.register(Arc::new(tool)).await;
                     }
+                    Ok(())
                 }
-                Err(e) => tracing::error!("Failed to list tools for MCP server: {}", e),
+                Err(e) => {
+                    tracing::error!("Failed to list tools for MCP server {}: {}", name, e);
+                    Err(e)
+                }
             }
+        }
+        
+        pub async fn unregister_executor(&self, name: &str) {
+            self.registry.unregister_by_prefix(name).await;
         }
         
         pub async fn add_tool(&self, tool: Arc<dyn crate::tools::Tool>) {

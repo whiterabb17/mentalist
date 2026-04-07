@@ -126,7 +126,16 @@ impl McpServer {
         stdin.flush().await?;
 
         let mut line = String::new();
-        stdout.read_line(&mut line).await?;
+        let timeout = self.initialization_timeout;
+        
+        tokio::select! {
+            res = stdout.read_line(&mut line) => {
+                res?;
+            }
+            _ = tokio::time::sleep(timeout) => {
+                anyhow::bail!("MCP raw_call timeout ({}s) for method: {}", timeout.as_secs(), method);
+            }
+        }
         
         let response: Value = serde_json::from_str(&line)?;
         if let Some(err) = response.get("error") {
@@ -174,10 +183,22 @@ impl McpServer {
         }
         Ok(tools)
     }
+
+    pub async fn stop(&self) -> Result<()> {
+        let mut process_guard = self.process.lock().await;
+        if let Some(mut child) = process_guard.take() {
+            tracing::info!(target: "mentalist::mcp", "[{}] Stopping MCP server process", self.name);
+            let _ = child.kill().await;
+        }
+        let mut stdio_guard = self.stdio.lock().await;
+        *stdio_guard = None;
+        Ok(())
+    }
 }
 
 pub struct McpTool {
     pub server: Arc<McpServer>,
+    pub source: String,
     pub name: String,
     pub description: String,
     pub parameters: Value,
@@ -190,11 +211,16 @@ impl Tool for McpTool {
             name: self.name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
+            source: self.source.clone(),
         }
     }
 
     async fn execute(&self, input: Value) -> Result<Value> {
         self.server.call(&self.name, input).await
+    }
+
+    fn source(&self) -> String {
+        self.source.clone()
     }
 }
 
