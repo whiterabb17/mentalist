@@ -48,7 +48,7 @@ impl LLMProvider for NoOpModel {
 struct MockPlanner;
 #[async_trait]
 impl Planner for MockPlanner {
-    async fn create_plan(&self, _goal: &str, _context: &Context, _todo: Option<&str>) -> anyhow::Result<ExecutionPlan> {
+    async fn create_plan(&self, _goal: &str, _context: &Context, _tools: Vec<mentalist::tools::ToolSchema>, _todo: Option<&str>) -> anyhow::Result<ExecutionPlan> {
         let mut plan = ExecutionPlan::new();
         let task_id = TaskId("task-1".into());
         plan.add_task(TaskNode {
@@ -67,7 +67,7 @@ impl Planner for MockPlanner {
 struct MockCritic;
 #[async_trait]
 impl Critic for MockCritic {
-    async fn evaluate(&self, _results: &HashMap<TaskId, ExecutionResult>) -> anyhow::Result<Feedback> {
+    async fn evaluate(&self, _goal: &str, _context: &Context, _results: &HashMap<TaskId, ExecutionResult>) -> anyhow::Result<Feedback> {
         Ok(Feedback { score: 1.0, critique: "Good".into(), suggests_retry: false })
     }
 }
@@ -184,6 +184,7 @@ fn bench_runtime_overhead(c: &mut Criterion) {
         security: Arc::new(SecurityEngine::new(policy)),
         critic: Arc::new(MockCritic),
         limits: ExecutionLimits { max_steps: 1, timeout_seconds: 10 },
+        middlewares: vec![],
     };
 
     let ctx = Context { items: vec![] };

@@ -41,6 +41,7 @@ impl Planner for MockPlanner {
         &self,
         _goal: &str,
         _context: &Context,
+        _tools: Vec<mentalist::tools::ToolSchema>,
         _todo: Option<&str>,
     ) -> anyhow::Result<ExecutionPlan> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -74,6 +75,8 @@ struct MultiStepCritic {
 impl Critic for MultiStepCritic {
     async fn evaluate(
         &self,
+        _goal: &str,
+        _context: &Context,
         _results: &std::collections::HashMap<mem_planner::TaskId, ExecutionResult>,
     ) -> anyhow::Result<Feedback> {
         let count = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -128,6 +131,7 @@ async fn test_runtime_multi_phase_reasoning() {
             max_steps: 3,
             timeout_seconds: 60,
         },
+        middlewares: vec![],
     };
 
     let result = runtime
@@ -156,6 +160,7 @@ impl Planner for ConversationalPlanner {
         &self,
         _goal: &str,
         _context: &Context,
+        _tools: Vec<mentalist::tools::ToolSchema>,
         _todo: Option<&str>,
     ) -> anyhow::Result<ExecutionPlan> {
         Ok(ExecutionPlan {
@@ -199,6 +204,7 @@ async fn test_runtime_conversational_flow() {
             max_steps: 3,
             timeout_seconds: 60,
         },
+        middlewares: vec![],
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();

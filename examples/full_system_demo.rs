@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         security,
         critic,
         limits: ExecutionLimits { max_steps: 10, timeout_seconds: 600 },
+        middlewares: vec![],
     };
 
     // 6. Run Mission

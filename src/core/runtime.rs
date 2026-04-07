@@ -38,6 +38,7 @@ pub struct AgentRuntime {
     pub security: Arc<SecurityEngine>,
     pub critic: Arc<dyn Critic>,
     pub limits: ExecutionLimits,
+    pub middlewares: Vec<Arc<dyn crate::middleware::Middleware>>,
 }
 
 impl AgentRuntime {
@@ -67,6 +68,10 @@ impl AgentRuntime {
             }
         };
 
+        // 0. SECURITY: SANITIZE GOAL
+        let goal = self.security.sanitize_prompt(goal);
+        let goal = &goal;
+
         while step < self.limits.max_steps && !completed {
             step += 1;
             
@@ -74,8 +79,24 @@ impl AgentRuntime {
             if let Some(ref tx) = tx {
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Planning...", step)));
             }
+
+            // 1. PROACTIVE RAG (Middleware Hook)
+            let mut req = mem_core::Request {
+                prompt: goal.to_string(),
+                context: Arc::new(ctx.clone()),
+                tools: Vec::new(), // Populated by planner or ToolDiscoveryMiddleware
+            };
+
+            for mw in &self.middlewares {
+                if let Err(e) = mw.before_ai_call(&mut req).await {
+                    tracing::error!(mw = mw.name(), error = ?e, "Middleware before_ai_call failed");
+                    if mw.is_critical() { return Err(e); }
+                }
+            }
+            // Update context from enriched request (RAG facts injected here)
+            ctx = (*req.context).clone();
             
-            // 0. SUMMARIZE CONTEXT (if needed)
+            // 2. SUMMARIZE CONTEXT (if needed)
             let current_tokens: usize = ctx.items.iter().map(|i| mem_core::estimate_tokens(&i.content)).sum();
             if current_tokens > 24000 && ctx.items.len() > 10 {
                 tracing::info!(current_tokens, "Context threshold exceeded, summarization triggered");
@@ -87,13 +108,26 @@ impl AgentRuntime {
             
             tracing::info!(step, goal, "Phase: PLAN");
             
-            // 1. PLAN
+            // 3. PLAN
             let tools = self.tools.list_tools().await;
             let mut plan = self.planner.create_plan(goal, &ctx, tools, None).await?;
             if let Some(usage) = &plan.usage {
                 total_input_tokens += usage.prompt_tokens as usize;
                 total_output_tokens += usage.completion_tokens as usize;
             }
+            
+            // 4. DEDUCTIVE FACT EXTRACTION (Middleware Hook)
+            let mut res_mw = mem_core::Response {
+                content: plan.content.clone(),
+                tool_calls: Vec::new(), // Not used for extraction in the planner phase usually, but hooks are there
+                usage: plan.usage.clone(),
+            };
+            for mw in &self.middlewares {
+                if let Err(e) = mw.after_ai_call(&mut res_mw).await {
+                    tracing::error!(mw = mw.name(), error = ?e, "Middleware after_ai_call failed");
+                }
+            }
+            
             tracing::info!(tasks = ?plan.tasks.keys().collect::<Vec<_>>(), "Initial plan");
 
             if plan.requires_approval {
@@ -170,6 +204,7 @@ impl AgentRuntime {
                 let tools = Arc::clone(&tools);
                 let security = Arc::clone(&security);
                 let tx_deep = tx_inner.clone();
+                let mws = self.middlewares.clone(); 
                 async move {
                     let mut success = false;
                     let mut output = serde_json::Value::String("Task failed: No tool specified".into());
@@ -179,11 +214,25 @@ impl AgentRuntime {
                             let _ = tx.send(RuntimeEvent::ToolStarted(tool_name.clone()));
                         }
                         
+                        let mut tc = mem_core::ToolCall {
+                            name: tool_name.clone(),
+                            arguments: task.tool_args.clone().unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                            id: task.id.to_string(),
+                        };
+                        for mw in &mws {
+                            if let Err(e) = mw.before_tool_call(&mut tc).await {
+                                return crate::execution::executor::ExecutionResult {
+                                    task_id: task.id,
+                                    output: serde_json::Value::String(format!("Safety Block: {}", e)),
+                                    success: false,
+                                };
+                            }
+                        }
+
                         if let Err(e) = security.validate_tool_call(&tool_name) {
                             output = serde_json::Value::String(format!("Security Violation: {}", e));
                         } else if let Some(tool) = tools.get(&tool_name).await {
-                            let args = task.tool_args.unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                            match tool.execute(args).await {
+                            match tool.execute(tc.arguments).await {
                                 Ok(res) => {
                                     output = res;
                                     success = true;
@@ -196,8 +245,14 @@ impl AgentRuntime {
                             output = serde_json::Value::String(format!("Tool '{}' not found", tool_name));
                         }
                         
+                        // 2. Learning Gate (Middleware Hook)
+                        let mut result_string = output.to_string();
+                        for mw in &mws {
+                            let _ = mw.after_tool_call(&tc, &mut result_string).await;
+                        }
+                        
                         if let Some(ref tx) = tx_deep {
-                            let _ = tx.send(RuntimeEvent::ToolFinished(tool_name, output.to_string(), success));
+                            let _ = tx.send(RuntimeEvent::ToolFinished(tool_name, result_string, success));
                         }
                     }
 
@@ -467,5 +522,12 @@ Preserve all key facts, discovered information, and completed task results.
         ctx.items = new_items;
 
         Ok(ctx)
+    }
+
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        for mw in &self.middlewares {
+            mw.shutdown().await?;
+        }
+        Ok(())
     }
 }
