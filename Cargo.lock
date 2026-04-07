@@ -345,8 +345,7 @@ dependencies = [
 
 [[package]]
 name = "brain"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "mem-bridge",
@@ -2237,8 +2236,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mem-bridge"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2251,9 +2249,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mem-broker"
+version = "0.2.8"
+dependencies = [
+ "anyhow",
+ "fs4",
+ "mem-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mem-compactor"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2268,8 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "mem-core"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2297,8 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "mem-dreamer"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2314,8 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "mem-extractor"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2331,8 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "mem-micro"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2346,8 +2352,7 @@ dependencies = [
 
 [[package]]
 name = "mem-offloader"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2361,8 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "mem-personality"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2375,9 +2379,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mem-planner"
+version = "0.2.8"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "mem-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "mem-resilience"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2393,8 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "mem-retriever"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2411,8 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "mem-session"
-version = "0.2.4"
-source = "git+https://github.com/whiterabb17/mindpalace.git#f9ac907f74ff3da2a3ad2e21e2729e43bf6f2cbd"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2451,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "mentalist"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -2465,6 +2481,7 @@ dependencies = [
  "criterion",
  "futures-util",
  "mem-bridge",
+ "mem-broker",
  "mem-compactor",
  "mem-core",
  "mem-dreamer",
@@ -2472,11 +2489,13 @@ dependencies = [
  "mem-micro",
  "mem-offloader",
  "mem-personality",
+ "mem-planner",
  "mem-resilience",
  "mem-retriever",
  "mem-session",
  "mockito",
  "once_cell",
+ "regex",
  "reqwest 0.12.28",
  "reqwest-eventsource",
  "ruvector-core",

@@ -1,10 +1,11 @@
-use crate::executor::ToolExecutor;
-use crate::{Request, Response, ToolCall};
+use crate::execution::executor::Executor;
+use crate::tools::registry::ToolRegistry;
+pub use mem_core::{Request, Response, ToolCall, Context};
 use async_trait::async_trait;
 use brain::Brain;
 use mem_bridge::AgentBridge;
 use mem_compactor::IntelligentFullCompactor;
-use mem_core::{Context, FileStorage, MemoryItem, MemoryRole, MindPalaceConfig};
+use mem_core::{FileStorage, MemoryItem, MemoryRole, MindPalaceConfig};
 use mem_dreamer::DreamWorker;
 use mem_extractor::{FactExtractor, ReflectionLayer};
 use mem_micro::{AdaptiveMicroCompactor, TTLDecayStrategy};
@@ -372,14 +373,14 @@ impl Middleware for MindPalaceMiddleware {
 
 pub mod todo;
 
-/// Automatically discovers and injects tools from the executor into the AI request.
+/// Automatically discovers and injects tools from the registry into the AI request.
 pub struct ToolDiscoveryMiddleware {
-    pub executor: Arc<dyn ToolExecutor>,
+    pub tools: Arc<ToolRegistry>,
 }
 
 impl ToolDiscoveryMiddleware {
-    pub fn new(executor: Arc<dyn ToolExecutor>) -> Self {
-        Self { executor }
+    pub fn new(tools: Arc<ToolRegistry>) -> Self {
+        Self { tools }
     }
 }
 
@@ -389,16 +390,20 @@ impl Middleware for ToolDiscoveryMiddleware {
         "ToolDiscovery"
     }
 
-    /// Tool discovery failure should degrade gracefully — the agent can still respond
-    /// without tools rather than crashing the entire request chain. An MCP process
-    /// that fails to start (e.g. npx not on PATH) would otherwise abort every call.
     fn is_critical(&self) -> bool {
         false
     }
 
     async fn before_ai_call(&self, req: &mut Request) -> anyhow::Result<()> {
-        let tools = self.executor.list_tools().await?;
-        req.tools.extend(tools);
+        let tools = self.tools.list_tools().await;
+        // Map ToolSchema to mem_core::ToolDefinition (they are structurally identical)
+        for t in tools {
+            req.tools.push(mem_core::ToolDefinition {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters,
+            });
+        }
         Ok(())
     }
 }

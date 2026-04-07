@@ -1,83 +1,96 @@
-use mentalist::executor::{SandboxedExecutor, ExecutionMode, CommandValidator, ToolExecutor};
-use std::path::Path;
-use serde_json::json;
+use mentalist::execution::executor::{Executor, ExecutionResult};
+use mentalist::execution::graph::TaskGraph;
+use mentalist::tools::{ToolRegistry, Tool, ToolSchema};
+use mem_planner::{ExecutionPlan, TaskId, TaskNode};
+use async_trait::async_trait;
+use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::time::{sleep, Duration};
 
-#[tokio::test]
-async fn test_command_validator_blocking() {
-    let validator = CommandValidator::new_default();
-    let root = Path::new("/");
-    
-    // Assert commands not in whitelist are blocked
-    assert!(validator.validate("rm", &["-rf".to_string(), "/".to_string()], root).is_err());
-    assert!(validator.validate("chmod", &["777".to_string(), "file".to_string()], root).is_err());
-    assert!(validator.validate("mkfs", &["/dev/sda1".to_string()], root).is_err());
-    
-    // Assert safe whitelisted commands are allowed
-    assert!(validator.validate("ls", &["-la".to_string()], root).is_ok());
-    assert!(validator.validate("cat", &["README.md".to_string()], root).is_ok());
-}
-
-#[tokio::test]
-async fn test_local_executor_success() {
-    let root = std::env::current_dir().unwrap();
-    let executor = SandboxedExecutor::new(
-        ExecutionMode::Local,
-        root.clone(),
-        Some(root.clone())
-    ).expect("Failed to create executor");
-    
-    // Run a simple echo command via a python script to avoid shell character validation
-    let script_path = root.join("hello_gypsy.py");
-    std::fs::write(&script_path, "print('hello-gypsy')").unwrap();
-    
-    let result: anyhow::Result<String> = executor.execute("python", json!(vec!["hello_gypsy.py".to_string()])).await;
-    let _ = std::fs::remove_file(&script_path);
-    
-    match result {
-        Ok(out) => assert!(out.contains("hello-gypsy")),
-        Err(e) => panic!("Executor failed with error: {:?}. Please ensure python or python3 is in your PATH.", e),
+struct MockTool;
+#[async_trait]
+impl Tool for MockTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema { name: "mock".into(), description: "mock".into(), parameters: Value::Null }
+    }
+    async fn execute(&self, _input: Value) -> anyhow::Result<Value> {
+        Ok(serde_json::json!({ "result": "success" }))
     }
 }
 
 #[tokio::test]
-async fn test_local_executor_security_gate() {
-    let root = std::env::current_dir().unwrap();
-    let executor = SandboxedExecutor::new(
-        ExecutionMode::Local,
-        root.clone(),
-        Some(root.clone())
-    ).expect("Failed to create executor");
-    
-    // Verify that even in Local mode, the validator blocks rm
-    let result: anyhow::Result<String> = executor.execute("rm", json!(vec!["some_file".to_string()])).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not in the whitelist"));
-}
+async fn test_parallel_executor_complex_dag() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool));
+    let executor = Executor::new(Arc::new(tools));
 
-#[tokio::test]
-async fn test_vault_working_directory() {
-    let root = std::env::current_dir().unwrap();
-    let vault = root.join("test_vault_tmp");
-    let _ = std::fs::remove_dir_all(&vault); 
-    std::fs::create_dir_all(&vault).unwrap();
+    let mut plan = ExecutionPlan::new();
+
+    // DAG Structure:
+    // A -> B
+    // A -> C
+    // B, C -> D
+    // E (Independent)
+
+    let id_a = TaskId::new();
+    let id_b = TaskId::new();
+    let id_c = TaskId::new();
+    let id_d = TaskId::new();
+    let id_e = TaskId::new();
+
+    plan.add_task(TaskNode {
+        id: id_a.clone(), name: "A".into(), description: "A".into(),
+        tool_name: Some("mock".into()), tool_args: None,
+        dependencies: vec![], metadata: Value::Null,
+    });
+
+    plan.add_task(TaskNode {
+        id: id_b.clone(), name: "B".into(), description: "B".into(),
+        tool_name: Some("mock".into()), tool_args: None,
+        dependencies: vec![id_a.clone()], metadata: Value::Null,
+    });
+
+    plan.add_task(TaskNode {
+        id: id_c.clone(), name: "C".into(), description: "C".into(),
+        tool_name: Some("mock".into()), tool_args: None,
+        dependencies: vec![id_a.clone()], metadata: Value::Null,
+    });
+
+    plan.add_task(TaskNode {
+        id: id_d.clone(), name: "D".into(), description: "D".into(),
+        tool_name: Some("mock".into()), tool_args: None,
+        dependencies: vec![id_b.clone(), id_c.clone()], metadata: Value::Null,
+    });
+
+    plan.add_task(TaskNode {
+        id: id_e.clone(), name: "E".into(), description: "E".into(),
+        tool_name: Some("mock".into()), tool_args: None,
+        dependencies: vec![], metadata: Value::Null,
+    });
+
+    let graph = TaskGraph::new(plan);
+    let counter = Arc::clone(&call_count);
     
-    let executor = SandboxedExecutor::new(
-        ExecutionMode::Local,
-        root.clone(),
-        Some(vault.clone())
-    ).expect("Failed to create executor");
+    let results = executor.execute_parallel(&graph, move |task| {
+        let c = Arc::clone(&counter);
+        async move {
+            c.fetch_add(1, Ordering::SeqCst);
+            sleep(Duration::from_millis(10)).await;
+            ExecutionResult {
+                task_id: task.id,
+                output: serde_json::json!({ "status": "ok" }),
+                success: true,
+            }
+        }
+    }).await.unwrap();
+
+    assert_eq!(results.len(), 5);
+    assert_eq!(call_count.load(Ordering::SeqCst), 5, "All 5 tasks in the DAG should have been executed");
     
-    // Create a file in vault and verify it sees it via python script (avoiding forbidden chars in args)
-    std::fs::write(vault.join("secret.txt"), "gypsy-data").unwrap();
-    let list_script = vault.join("list_dir.py");
-    std::fs::write(&list_script, "import os; print(os.listdir('.'))").unwrap();
-    
-    let result_str: String = match executor.execute("python", json!(vec!["list_dir.py".to_string()])).await {
-        Ok(out) => out,
-        Err(e) => panic!("Python execution failed in vault: {:?}. Ensure python/python3 is accessible.", e),
-    };
-    assert!(result_str.contains("secret.txt"));
-    
-    // Cleanup
-    let _ = std::fs::remove_dir_all(&vault);
+    // Ensure all tasks succeeded
+    for id in &[id_a, id_b, id_c, id_d, id_e] {
+        assert!(results.get(id).unwrap().success);
+    }
 }

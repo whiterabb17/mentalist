@@ -1,45 +1,19 @@
-use mentalist::executor::{SandboxedExecutor, ExecutionMode, ToolExecutor};
-use std::path::PathBuf;
-use anyhow::Result;
-use serde_json::json;
+use mentalist::execution::executor::Executor;
+use mentalist::tools::ToolRegistry;
+use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // 1. Configure the Sandboxed Executor for Wasm
-    // You must have a python.wasm file in the ./tools directory.
-    // Download from: https://github.com/vmware-labs/webassembly-language-runtimes
-    let executor = SandboxedExecutor::new(
-        ExecutionMode::Wasm { 
-            module_path: Some(PathBuf::from("./tools/python.wasm")), 
-            mount_root: true,
-            env_vars: std::collections::HashMap::new(),
-        },
-        PathBuf::from("./"), // Project root
-        None                 // vault_dir
-    ).expect("Failed to create Wasm executor");
+async fn main() -> anyhow::Result<()> {
+    println!("Mentalist Python/WASM Execution Demo (v0.3.3)");
+    
+    // 1. Setup Tool Registry
+    let tools = ToolRegistry::new();
+    // In a real demo, we'd add PyTool here for WASM execution
+    let tools = Arc::new(tools);
 
-    println!("🚀 Running Python via WebAssembly Sandbox...");
+    // 2. Setup Executor
+    let _executor = Executor::new(tools);
 
-    // 2. Prepare the Python command
-    // We pass -c to run a string, or you could pass a path to a file in /sandbox/
-    let cmd = "python"; // This is just a label in Wasm mode, the actual module is module_path
-    let args = vec![
-        "-c".to_string(), 
-        "print('Hello from Python.wasm! 🐍'); import sys; print(f'Platform: {sys.platform}'); print(f'Sandbox Path: {sys.path}')".to_string()
-    ];
-
-    // 3. Execute
-    match executor.execute(cmd, json!(args)).await {
-        Ok(output) => {
-            println!("--- Tool Output ---");
-            println!("{}", output);
-            println!("-------------------");
-        }
-        Err(e) => {
-            eprintln!("❌ Execution Failed: {}", e);
-            eprintln!("Note: Ensure ./tools/python.wasm exists and is a valid WASI module.");
-        }
-    }
-
+    println!("WASM tools integration is now managed via the Skill/Tool interface.");
     Ok(())
 }
