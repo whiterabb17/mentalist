@@ -55,6 +55,7 @@ impl AgentRuntime {
         let mut total_output_tokens = 0;
         let mut completed = false;
         let mut critique: Option<String> = None;
+        let mut last_plan_content = String::new();
 
         let send_metrics = |step: usize, phase: &str, tx: &Option<UnboundedSender<RuntimeEvent>>, input: usize, output: usize, ctx: &Context| {
             if let Some(ref tx) = tx {
@@ -112,6 +113,7 @@ impl AgentRuntime {
             // 3. PLAN
             let tools = self.tools.list_tools().await;
             let mut plan = self.planner.create_plan(goal, &ctx, tools, critique.take().as_deref()).await?;
+            last_plan_content = plan.content.clone();
             if let Some(usage) = &plan.usage {
                 total_input_tokens += usage.prompt_tokens as usize;
                 total_output_tokens += usage.completion_tokens as usize;
@@ -152,7 +154,11 @@ impl AgentRuntime {
 
             if !plan.content.is_empty() {
                 if let Some(ref tx) = tx {
-                    let _ = tx.send(RuntimeEvent::TextChunk(plan.content.clone()));
+                    if plan.content == mem_planner::PLAN_BOILERPLATE_TASKS || plan.content == mem_planner::PLAN_BOILERPLATE_NO_TASKS {
+                        let _ = tx.send(RuntimeEvent::Status(plan.content.clone()));
+                    } else {
+                        let _ = tx.send(RuntimeEvent::TextChunk(plan.content.clone()));
+                    }
                 }
             }
             
@@ -233,18 +239,34 @@ impl AgentRuntime {
 
                         if let Err(e) = security.validate_tool_call(&tool_name) {
                             output = serde_json::Value::String(format!("Security Violation: {}", e));
-                        } else if let Some(tool) = tools.get(&tool_name).await {
-                            match tool.execute(tc.arguments.clone()).await {
-                                Ok(res) => {
-                                    output = res;
-                                    success = true;
-                                }
-                                Err(e) => {
-                                    output = serde_json::Value::String(format!("Execution Error: {}", e));
+                        } else {
+                            // Robust tool lookup with aliasing and fuzzy matching
+                            let mut target_tool = tools.get(&tool_name).await;
+                            
+                            if target_tool.is_none() {
+                                let alias = match tool_name.as_str() {
+                                    "duckduckgo_web_search" | "web_search" | "ddg_search" => Some("duckduckgo_search"),
+                                    "read_file" => Some("filesystem_read_file"),
+                                    _ => None,
+                                };
+                                if let Some(a) = alias {
+                                     target_tool = tools.get(a).await;
                                 }
                             }
-                        } else {
-                            output = serde_json::Value::String(format!("Tool '{}' not found", tool_name));
+
+                            if let Some(tool) = target_tool {
+                                match tool.execute(tc.arguments.clone()).await {
+                                    Ok(res) => {
+                                        output = res;
+                                        success = true;
+                                    }
+                                    Err(e) => {
+                                        output = serde_json::Value::String(format!("Execution Error: {}", e));
+                                    }
+                                }
+                            } else {
+                                output = serde_json::Value::String(format!("Tool '{}' not found", tool_name));
+                            }
                         }
                         
                         // 2. Learning Gate (Middleware Hook)
@@ -317,6 +339,17 @@ impl AgentRuntime {
             let _ = tx.send(RuntimeEvent::Status("Finalizing report...".into()));
         }
 
+        // Deduplication: If the planner already provided a substantial answer (not boilerplate)
+        // and it was already sent to the user as a TextChunk, we can skip the final summary.
+        let is_boilerplate = last_plan_content == mem_planner::PLAN_BOILERPLATE_TASKS || last_plan_content == mem_planner::PLAN_BOILERPLATE_NO_TASKS;
+        if !last_plan_content.is_empty() && !is_boilerplate && last_plan_content.len() > 150 {
+            tracing::info!("Skipping final summary as plan content already provides a substantial answer.");
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::Status("Goal completed.".into()));
+            }
+            return Ok(last_plan_content);
+        }
+
         let summary_prompt = format!(
             "The user asked: '{}'. \nBased on the steps we have taken and the information gathered in the context, provide a direct, helpful, and natural language response to the user's goal. DO NOT use JSON. Simply answer the question.",
             goal
@@ -331,9 +364,12 @@ impl AgentRuntime {
         let response = self.llm.generate(req).await?;
         
         if !response.content.is_empty() {
-             if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::TextChunk(response.content.clone()));
-            }
+             // Avoid exact duplicates
+             if response.content.trim() != last_plan_content.trim() {
+                 if let Some(ref tx) = tx {
+                    let _ = tx.send(RuntimeEvent::TextChunk(response.content.clone()));
+                }
+             }
         }
 
         send_metrics(step, "COMPLETED", &tx, total_input_tokens, total_output_tokens, &ctx);
@@ -402,15 +438,30 @@ impl AgentRuntime {
                     if let Some(tool_name) = task.tool_name {
                         if let Err(e) = security.validate_tool_call(&tool_name) {
                             output = serde_json::Value::String(format!("Security Violation: {}", e));
-                        } else if let Some(tool) = tools.get(&tool_name).await {
-                            let args = task.tool_args.unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                            match tool.execute(args).await {
-                                Ok(res) => {
-                                    output = res;
-                                    success = true;
+                        } else {
+                            let mut target_tool = tools.get(&tool_name).await;
+                            
+                            if target_tool.is_none() {
+                                let alias = match tool_name.as_str() {
+                                    "duckduckgo_web_search" | "web_search" | "ddg_search" => Some("duckduckgo_search"),
+                                    "read_file" => Some("filesystem_read_file"),
+                                    _ => None,
+                                };
+                                if let Some(a) = alias {
+                                     target_tool = tools.get(a).await;
                                 }
-                                Err(e) => {
-                                    output = serde_json::Value::String(format!("Execution Error: {}", e));
+                            }
+
+                            if let Some(tool) = target_tool {
+                                let args = task.tool_args.unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                match tool.execute(args).await {
+                                    Ok(res) => {
+                                        output = res;
+                                        success = true;
+                                    }
+                                    Err(e) => {
+                                        output = serde_json::Value::String(format!("Execution Error: {}", e));
+                                    }
                                 }
                             }
                         }

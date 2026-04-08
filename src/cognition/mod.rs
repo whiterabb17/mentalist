@@ -27,34 +27,7 @@ impl Planner for MindPalacePlanner {
             description: s.description,
             parameters: s.parameters,
         }).collect();
-        let mut plan = self.engine.plan(goal, context, definitions, todo).await?;
-
-        // Robustness: If tasks are empty but content looks like JSON, try a manual recovery parse
-        if plan.tasks.is_empty() && plan.content.contains('{') {
-            tracing::warn!("Planner returned empty tasks but content contains JSON. Attempting recovery...");
-            
-            let json_str = if let Some(start) = plan.content.find('{') {
-                if let Some(end) = plan.content.rfind('}') {
-                    &plan.content[start..=end]
-                } else {
-                    &plan.content[start..]
-                }
-            } else {
-                &plan.content
-            };
-
-            // Partial recovery of task list if possible
-            if let Ok(recovered_tasks) = serde_json::from_str::<std::collections::HashMap<mem_planner::TaskId, mem_planner::TaskNode>>(json_str) {
-                 plan.tasks = recovered_tasks;
-                 tracing::info!("Recovered {} tasks from raw content", plan.tasks.len());
-            } else {
-                // Try parsing as the full ExecutionPlan object
-                if let Ok(recovered_plan) = serde_json::from_str::<ExecutionPlan>(json_str) {
-                    plan.tasks = recovered_plan.tasks;
-                    tracing::info!("Recovered {} tasks from full JSON plan", plan.tasks.len());
-                }
-            }
-        }
+        let plan = self.engine.plan(goal, context, definitions, todo).await?;
 
         Ok(plan)
     }
@@ -118,12 +91,10 @@ Your task is to evaluate if the high-level user goal has been fully achieved bas
 
 ### INSTRUCTIONS ###
 1. Assess if the user's explicit goal is fully met.
-2. DO NOT be pedantic. If the user asked for a list and you have a list, the goal is achieved.
-3. DO NOT suggest a retry for "helpful" information that the user did not explicitly request.
-4. Provide a score between 0.0 and 1.0 (1.0 = Perfect fulfillment of user goal, 0.0 = Failed).
-5. If and ONLY if the user's explicit goal is not met, provide a critique and set suggests_retry to true.
-6. Output your response as a SINGLE JSON OBJECT matching the schema below.
-7. DO NOT wrap the response in task IDs. Provide global feedback only.
+2. DECISIVENESS: If the goal is to "research" or "find" something, and the results are present in the context, the goal is ACHIEVED. DO NOT suggest a retry just for "more details" unless the user explicitly asked for them.
+3. NO PEDANTRY: If the user asked for a list and you have a list, the goal is achieved.
+4. If most tasks succeeded and the core objective is met, give a high score (0.95-1.0).
+5. Output your response as a SINGLE JSON OBJECT matching the schema below.
 
 REQUIRED SCHEMA:
 {{
