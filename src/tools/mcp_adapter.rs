@@ -236,17 +236,27 @@ pub struct BuiltinMcp;
 
 impl BuiltinMcp {
     pub fn filesystem(paths: Vec<String>, root: Option<&std::path::Path>) -> Result<McpServer> {
-        let cmd = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
-        let mut args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
-        args.extend(paths);
-        let mut server = McpServer::new("filesystem".to_string(), cmd.to_string(), args);
-        if let Some(p) = root {
-            // Run npx from the server's own isolated install directory
-            let server_dir = p.join("filesystem");
-            server = server.with_cwd(server_dir);
+        let (cmd, args) = if let Some(r) = root {
+            let bin_name = if cfg!(target_os = "windows") { "mcp-server-filesystem.cmd" } else { "mcp-server-filesystem" };
+            let bin_path = r.join("filesystem").join("node_modules").join(".bin").join(bin_name);
+            
+            if bin_path.exists() {
+                (bin_path.to_string_lossy().to_string(), paths)
+            } else {
+                let npx = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+                let mut npx_args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
+                npx_args.extend(paths);
+                (npx.to_string(), npx_args)
+            }
         } else {
-            server = server.with_cwd(std::env::current_dir()?);
-        }
+            let npx = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+            let mut npx_args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
+            npx_args.extend(paths);
+            (npx.to_string(), npx_args)
+        };
+
+        let mut server = McpServer::new("filesystem".to_string(), cmd, args);
+        server = server.with_cwd(std::env::current_dir()?);
         Ok(server)
     }
 

@@ -332,7 +332,8 @@ impl Middleware for MindPalaceMiddleware {
 
         let new_facts = self.extractor.extract_facts(&ai_context).await?;
         if !new_facts.is_empty() {
-            tracing::info!("Extracted {} facts from AI response.", new_facts.len());
+            let fact_strings: Vec<String> = new_facts.iter().map(|f| f.content.clone()).collect();
+            tracing::info!(facts = ?fact_strings, "Extracted {} facts from AI response.", new_facts.len());
             self.extractor.commit_knowledge(new_facts).await?;
             self.retriever
                 .hydrate_from_kb(&self.extractor.knowledge_path)
@@ -354,7 +355,8 @@ impl Middleware for MindPalaceMiddleware {
 
         let new_facts = self.extractor.extract_facts(&temp_context).await?;
         if !new_facts.is_empty() {
-            tracing::info!("Extracted {} facts from tool output.", new_facts.len());
+            let fact_strings: Vec<String> = new_facts.iter().map(|f| f.content.clone()).collect();
+            tracing::info!(facts = ?fact_strings, "Extracted {} facts from tool output.", new_facts.len());
             self.extractor.commit_knowledge(new_facts).await?;
             self.retriever
                 .hydrate_from_kb(&self.extractor.knowledge_path)

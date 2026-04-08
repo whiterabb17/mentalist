@@ -27,14 +27,45 @@ impl Planner for MindPalacePlanner {
             description: s.description,
             parameters: s.parameters,
         }).collect();
-        self.engine.plan(goal, context, definitions, todo).await
+        let mut plan = self.engine.plan(goal, context, definitions, todo).await?;
+
+        // Robustness: If tasks are empty but content looks like JSON, try a manual recovery parse
+        if plan.tasks.is_empty() && plan.content.contains('{') {
+            tracing::warn!("Planner returned empty tasks but content contains JSON. Attempting recovery...");
+            
+            let json_str = if let Some(start) = plan.content.find('{') {
+                if let Some(end) = plan.content.rfind('}') {
+                    &plan.content[start..=end]
+                } else {
+                    &plan.content[start..]
+                }
+            } else {
+                &plan.content
+            };
+
+            // Partial recovery of task list if possible
+            if let Ok(recovered_tasks) = serde_json::from_str::<std::collections::HashMap<mem_planner::TaskId, mem_planner::TaskNode>>(json_str) {
+                 plan.tasks = recovered_tasks;
+                 tracing::info!("Recovered {} tasks from raw content", plan.tasks.len());
+            } else {
+                // Try parsing as the full ExecutionPlan object
+                if let Ok(recovered_plan) = serde_json::from_str::<ExecutionPlan>(json_str) {
+                    plan.tasks = recovered_plan.tasks;
+                    tracing::info!("Recovered {} tasks from full JSON plan", plan.tasks.len());
+                }
+            }
+        }
+
+        Ok(plan)
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Feedback {
     pub score: f32,
+    #[serde(alias = "explanation")]
     pub critique: String,
+    #[serde(alias = "suggested_retry")]
     pub suggests_retry: bool,
 }
 
@@ -74,7 +105,7 @@ impl Critic for LlmCritic {
 
         let prompt = format!(
             r#"You are the Critic Module of a Cognitive Agent.
-Your task is to evaluate if the high-level goal has been achieved based on the execution results of the planned tasks.
+Your task is to evaluate if the high-level user goal has been fully achieved based on the execution results of the planned tasks.
 
 ### GOAL ###
 {}
@@ -86,10 +117,20 @@ Your task is to evaluate if the high-level goal has been achieved based on the e
 {}
 
 ### INSTRUCTIONS ###
-1. Assess if the goal is fully met.
-2. Provide a score between 0.0 and 1.0 (1.0 = Perfect, 0.0 = Failed).
-3. If not perfect, provide a critique and set suggests_retry to true.
-4. Output your response as JSON.
+1. Assess if the user's explicit goal is fully met.
+2. DO NOT be pedantic. If the user asked for a list and you have a list, the goal is achieved.
+3. DO NOT suggest a retry for "helpful" information that the user did not explicitly request.
+4. Provide a score between 0.0 and 1.0 (1.0 = Perfect fulfillment of user goal, 0.0 = Failed).
+5. If and ONLY if the user's explicit goal is not met, provide a critique and set suggests_retry to true.
+6. Output your response as a SINGLE JSON OBJECT matching the schema below.
+7. DO NOT wrap the response in task IDs. Provide global feedback only.
+
+REQUIRED SCHEMA:
+{{
+  "score": float,
+  "critique": "string",
+  "suggests_retry": boolean
+}}
 
 JSON OUTPUT:
 "#,
@@ -115,11 +156,27 @@ JSON OUTPUT:
             &content
         };
 
-        let feedback: Feedback = serde_json::from_str(json_str).unwrap_or(Feedback {
-            score: 0.0,
-            critique: format!("Failed to parse critic response: {}", content),
-            suggests_retry: true,
-        });
+        // Aggressive parsing to handle LLM variations
+        let feedback: Feedback = if let Ok(f) = serde_json::from_str::<Feedback>(json_str) {
+            f
+        } else {
+            // Check if LLM wrapped feedback in task IDs (e.g. {"task_1": { "score": 0, ... }})
+            let map: Result<HashMap<String, Feedback>, _> = serde_json::from_str(json_str);
+            if let Ok(m) = map {
+                // Return the first failing task as representative feedback, or a summary
+                m.into_values().next().unwrap_or(Feedback {
+                    score: 0.0,
+                    critique: "Empty feedback map received".into(),
+                    suggests_retry: true,
+                })
+            } else {
+                Feedback {
+                    score: 0.0,
+                    critique: format!("Failed to parse critic response: {}", content),
+                    suggests_retry: true,
+                }
+            }
+        };
 
         Ok(feedback)
     }
@@ -134,4 +191,35 @@ pub enum RuntimeEvent {
         context_size: usize,
     },
     AwaitingApproval(mem_planner::ExecutionPlan),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_feedback_parsing_aliases() {
+        let json = r#"{
+            "score": 0.5,
+            "explanation": "Needs more detail",
+            "suggested_retry": true
+        }"#;
+        let feedback: Feedback = serde_json::from_str(json).unwrap();
+        assert_eq!(feedback.score, 0.5);
+        assert_eq!(feedback.critique, "Needs more detail");
+        assert_eq!(feedback.suggests_retry, true);
+    }
+
+    #[test]
+    fn test_feedback_parsing_standard() {
+        let json = r#"{
+            "score": 1.0,
+            "critique": "Perfect",
+            "suggests_retry": false
+        }"#;
+        let feedback: Feedback = serde_json::from_str(json).unwrap();
+        assert_eq!(feedback.score, 1.0);
+        assert_eq!(feedback.critique, "Perfect");
+        assert_eq!(feedback.suggests_retry, false);
+    }
 }

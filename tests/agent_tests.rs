@@ -16,7 +16,7 @@ struct ReasoningLLM;
 #[async_trait]
 impl LLMProvider for ReasoningLLM {
     async fn generate(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
-        Ok(Response {
+        Ok(LlmResponse {
             content: "Mock plan JSON...".to_string(),
             tool_calls: vec![],
             usage: None,
@@ -45,7 +45,17 @@ impl Planner for MockPlanner {
         _todo: Option<&str>,
     ) -> anyhow::Result<ExecutionPlan> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        Ok(ExecutionPlan::new())
+        let mut plan = ExecutionPlan::new();
+        plan.add_task(mem_planner::TaskNode {
+            id: mem_planner::TaskId::new(),
+            name: "Dummy task".into(),
+            description: "A dummy task to trigger execution".into(),
+            tool_name: None,
+            tool_args: None,
+            dependencies: vec![],
+            metadata: serde_json::Value::Null,
+        });
+        Ok(plan)
     }
 }
 

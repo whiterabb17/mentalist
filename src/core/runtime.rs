@@ -54,6 +54,7 @@ impl AgentRuntime {
         let mut total_input_tokens = 0;
         let mut total_output_tokens = 0;
         let mut completed = false;
+        let mut critique: Option<String> = None;
 
         let send_metrics = |step: usize, phase: &str, tx: &Option<UnboundedSender<RuntimeEvent>>, input: usize, output: usize, ctx: &Context| {
             if let Some(ref tx) = tx {
@@ -110,7 +111,7 @@ impl AgentRuntime {
             
             // 3. PLAN
             let tools = self.tools.list_tools().await;
-            let mut plan = self.planner.create_plan(goal, &ctx, tools, None).await?;
+            let mut plan = self.planner.create_plan(goal, &ctx, tools, critique.take().as_deref()).await?;
             if let Some(usage) = &plan.usage {
                 total_input_tokens += usage.prompt_tokens as usize;
                 total_output_tokens += usage.completion_tokens as usize;
@@ -128,7 +129,8 @@ impl AgentRuntime {
                 }
             }
             
-            tracing::info!(tasks = ?plan.tasks.keys().collect::<Vec<_>>(), "Initial plan");
+            let task_info: Vec<String> = plan.tasks.values().map(|t| format!("{} ({})", t.name, t.tool_name.as_deref().unwrap_or("no-tool"))).collect();
+            tracing::info!(tasks = ?task_info, "Initial plan");
 
             if plan.requires_approval {
                 if let Some(ref tx) = tx {
@@ -154,57 +156,57 @@ impl AgentRuntime {
                 }
             }
             
-            // Fallback & Conversational logic
+            // 4. PLAN VALIDATION & RECOVERY
+            let is_json = plan.content.trim().starts_with('{') || plan.content.contains("\"tasks\":");
+            
+            // If tasks are missing, always try fallback parsing (handles XML, JSON fragments, etc.)
             if plan.tasks.is_empty() {
-                // 1. Try from plan.content (raw LLM response for current step)
                 let fallback_nodes = self.parse_fallback_tool_calls(&plan.content);
                 if !fallback_nodes.is_empty() {
-                    tracing::info!(step, "Using fallback parser: {} tools found in plan.content", fallback_nodes.len());
+                    tracing::info!(step, "Recovered {} tasks using fallback parser", fallback_nodes.len());
                     for node in fallback_nodes {
                         plan.tasks.insert(node.id.clone(), node);
                     }
-                } else if let Some(last_msg) = ctx.items.last() {
-                    // 2. Try from last message in context (e.g. if the user provided multiple tool calls)
-                    let fallback_nodes = self.parse_fallback_tool_calls(&last_msg.content);
-                    if !fallback_nodes.is_empty() {
-                        tracing::info!(step, "Using fallback parser: {} tools found in last context message", fallback_nodes.len());
-                        for node in fallback_nodes {
-                            plan.tasks.insert(node.id.clone(), node);
-                        }
-                    }
                 }
-                
-                // 3. Still empty? If we have content, it's conversational
-                if plan.tasks.is_empty() && !plan.content.is_empty() {
-                    send_metrics(step, "PLAN_COMPLETE", &tx, total_input_tokens, total_output_tokens, &ctx);
-                    completed = true;
-                    continue; // Skip execution phase
-                }
-            }
-            
-            if plan.tasks.is_empty() {
-                tracing::warn!("Execution plan is empty and no fallback tool calls found for goal: '{}'", goal);
-                completed = true;
-                continue;
             }
 
-            // 2. EXECUTE
+            // Still empty?
+            if plan.tasks.is_empty() {
+                // If it looks like JSON but we couldn't recover, it's a hard failure
+                if is_json {
+                     anyhow::bail!("Failed to parse execution plan format from LLM. Raw content: {}", plan.content);
+                }
+                
+                // If there's natural language content, it's a conversational response
+                if !plan.content.is_empty() {
+                    if let Some(ref tx) = tx {
+                        let _ = tx.send(RuntimeEvent::Status("Goal completed.".into()));
+                    }
+                    return Ok(plan.content);
+                }
+
+                // Completely empty?
+                anyhow::bail!("No actions or response generated for goal at step {}", step);
+            }
+
+            // 5. EXECUTE
             send_metrics(step, "EXECUTE", &tx, total_input_tokens, total_output_tokens, &ctx);
             if let Some(ref tx) = tx {
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Executing tasks...", step)));
             }
             
             tracing::info!(step, "Phase: EXECUTE");
-            let graph = crate::execution::graph::TaskGraph::new(plan);
+            let graph = crate::execution::graph::TaskGraph::new(plan.clone());
             let tools = Arc::clone(&self.tools);
             let security = Arc::clone(&self.security);
             let tx_inner = tx.clone();
 
+            let mws = self.middlewares.clone();
             let results = self.executor.execute_parallel(&graph, move |task| {
                 let tools = Arc::clone(&tools);
                 let security = Arc::clone(&security);
                 let tx_deep = tx_inner.clone();
-                let mws = self.middlewares.clone(); 
+                let mws = mws.clone(); 
                 async move {
                     let mut success = false;
                     let mut output = serde_json::Value::String("Task failed: No tool specified".into());
@@ -232,7 +234,7 @@ impl AgentRuntime {
                         if let Err(e) = security.validate_tool_call(&tool_name) {
                             output = serde_json::Value::String(format!("Security Violation: {}", e));
                         } else if let Some(tool) = tools.get(&tool_name).await {
-                            match tool.execute(tc.arguments).await {
+                            match tool.execute(tc.arguments.clone()).await {
                                 Ok(res) => {
                                     output = res;
                                     success = true;
@@ -295,32 +297,42 @@ impl AgentRuntime {
                 let _ = tx.send(RuntimeEvent::Status(format!("Step {}: Adapting plan...", step)));
             }
             
-            tracing::info!(step, feedback = feedback.critique, "Phase: ADAPT");
-            if feedback.score > 0.9 && !feedback.suggests_retry {
+            tracing::info!(step, feedback = feedback.critique, score = feedback.score, "Phase: ADAPT");
+            
+            // Completion criteria: Perfect score OR high score without retry suggestion
+            if feedback.score >= 1.0 {
+                tracing::info!("Goal achieved with perfect score. Terminating loop.");
                 completed = true;
-            } else if feedback.suggests_retry {
-                // If the critic suggests retry, we re-plan with tools
-                let tools = self.tools.list_tools().await;
-                plan = self.planner.create_plan(goal, &ctx, tools, Some(&feedback.critique)).await?;
-                tracing::info!("Re-planned due to critic feedback");
+            } else if feedback.score > 0.9 && !feedback.suggests_retry {
+                tracing::info!("Goal achieved with high score and no retry recommendation.");
+                completed = true;
+            } else if feedback.suggests_retry || feedback.score <= 0.9 {
+                critique = Some(feedback.critique.clone());
+                tracing::info!("Re-plan scheduled for next iteration due to critic feedback or low score");
             }
         }
 
-        // 6. FINAL SUMMARY
+        // 6. FINAL SUMMARY (Conversational)
         if let Some(ref tx) = tx {
             let _ = tx.send(RuntimeEvent::Status("Finalizing report...".into()));
         }
-        let tools = self.tools.list_tools().await;
-        let summary_plan = self.planner.create_plan(
-            &format!("Summarize the results of our steps to satisfy the original goal: {}", goal),
-            &ctx,
-            tools,
-            None
-        ).await?;
+
+        let summary_prompt = format!(
+            "The user asked: '{}'. \nBased on the steps we have taken and the information gathered in the context, provide a direct, helpful, and natural language response to the user's goal. DO NOT use JSON. Simply answer the question.",
+            goal
+        );
+
+        let req = crate::llm::LlmRequest {
+            prompt: summary_prompt,
+            context: Arc::new(ctx.clone()),
+            tools: vec![],
+        };
+
+        let response = self.llm.generate(req).await?;
         
-        if !summary_plan.content.is_empty() {
+        if !response.content.is_empty() {
              if let Some(ref tx) = tx {
-                let _ = tx.send(RuntimeEvent::TextChunk(summary_plan.content));
+                let _ = tx.send(RuntimeEvent::TextChunk(response.content.clone()));
             }
         }
 
@@ -329,7 +341,7 @@ impl AgentRuntime {
             let _ = tx.send(RuntimeEvent::Status("Goal completed.".into()));
         }
 
-        Ok("Goal completed".into())
+        Ok(response.content)
     }
 
     pub fn run_stream(
