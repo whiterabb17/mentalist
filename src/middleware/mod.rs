@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use brain::Brain;
 use mem_bridge::AgentBridge;
 use mem_compactor::IntelligentFullCompactor;
-use mem_core::{FileStorage, MemoryItem, MemoryRole, MindPalaceConfig};
+use mem_core::{FileStorage, MemoryItem, MemoryRole, MindPalaceConfig, StorageBackend};
 use mem_dreamer::DreamWorker;
 use mem_extractor::{FactExtractor, ReflectionLayer};
 use mem_micro::{AdaptiveMicroCompactor, TTLDecayStrategy};
@@ -101,30 +101,37 @@ impl Middleware for SafetyMiddleware {
 
 pub struct MindPalaceMiddleware {
     pub brain: Arc<Brain>,
-    pub extractor: Arc<FactExtractor<FileStorage>>,
+    pub session_extractor: Arc<FactExtractor<FileStorage>>,
+    pub shared_extractor: Arc<FactExtractor<FileStorage>>,
     pub retriever: MemoryRetriever<FileStorage>,
     pub bridge: Arc<AgentBridge<FileStorage>>,
     pub dreamer: Option<Arc<DreamWorker<FileStorage>>>,
     pub session_id: String,
+    pub shared_knowledge_path: String,
     pub token_budget: usize,
 }
 
 impl MindPalaceMiddleware {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         brain: Arc<Brain>,
-        extractor: Arc<FactExtractor<FileStorage>>,
+        session_extractor: Arc<FactExtractor<FileStorage>>,
+        shared_extractor: Arc<FactExtractor<FileStorage>>,
         retriever: MemoryRetriever<FileStorage>,
         bridge: Arc<AgentBridge<FileStorage>>,
         dreamer: Option<Arc<DreamWorker<FileStorage>>>,
         session_id: String,
+        shared_knowledge_path: String,
     ) -> Self {
         Self {
             brain,
-            extractor,
+            session_extractor,
+            shared_extractor,
             retriever,
             bridge,
             dreamer,
             session_id,
+            shared_knowledge_path,
             token_budget: 4096,
         }
     }
@@ -155,19 +162,32 @@ impl MindPalaceMiddleware {
         std::fs::create_dir_all(&narrative_dir).ok();
         std::fs::create_dir_all(&knowledge_dir).ok();
 
-        // Initialize Shared Infrastructure (Extractor)
-        let extractor = Arc::new(FactExtractor::new(
+        // 1. Session Extractor (Vault-specific)
+        let session_kb_path = knowledge_dir.join("knowledge.json");
+        let session_extractor = Arc::new(FactExtractor::new(
             llm.clone(),
             embeddings.clone(),
             storage.clone(),
             config.clone(),
-            "knowledge.json".to_string(),
+            session_kb_path.to_string_lossy().to_string(),
             session_id.clone(),
         ));
 
-        // 1. Identity & Ethics: Personality Guard (Priority 1)
+        // 2. Shared Extractor (Global-specific)
+        let shared_kb_path = "knowledge.json".to_string();
+        let shared_extractor = Arc::new(FactExtractor::new(
+            llm.clone(),
+            embeddings.clone(),
+            storage.clone(),
+            config.clone(),
+            shared_kb_path.clone(),
+            session_id.clone(),
+        ));
+
+        // 3. Identity & Ethics: Personality Guard (Priority 1)
         brain.add_layer(Arc::new(PersonalityGuard::new(
-            "Gypsy: A high-agency agentic AI focused on filesystem excellence and pair programming.".to_string(),
+            "Gypsy: A high-agency agentic AI focused on filesystem excellence and pair programming. \
+             You have access to a shared knowledge base containing learned patterns, tool optimizations, and user preferences from previous sessions.".to_string(),
             Some(llm.clone()),
         )));
 
@@ -178,7 +198,7 @@ impl MindPalaceMiddleware {
         )));
 
         // 3. Noise Reduction: Adaptive Micro Compactor (Priority 2)
-        let relevance_analyzer = Arc::clone(&extractor) as Arc<dyn mem_core::RelevanceAnalyzer>;
+        let relevance_analyzer = Arc::clone(&session_extractor) as Arc<dyn mem_core::RelevanceAnalyzer>;
         brain.add_layer(Arc::new(AdaptiveMicroCompactor::new(
             config.clone(),
             TTLDecayStrategy::AdaptiveByType,
@@ -198,11 +218,11 @@ impl MindPalaceMiddleware {
         )));
 
         // 5. Intelligence: Reflection & Fact Extraction (Priority 4/5)
-        brain.add_layer(Arc::new(ReflectionLayer::new(extractor.clone())));
-        brain.add_layer(extractor.clone() as Arc<dyn mem_core::MemoryLayer>);
+        brain.add_layer(Arc::new(ReflectionLayer::new(session_extractor.clone())));
+        brain.add_layer(session_extractor.clone() as Arc<dyn mem_core::MemoryLayer>);
 
         // 6. Emergency Pruning: Intelligent Full Compactor (Priority 4)
-        let importance_analyzer = Arc::clone(&extractor) as Arc<dyn mem_core::ImportanceAnalyzer>;
+        let importance_analyzer = Arc::clone(&session_extractor) as Arc<dyn mem_core::ImportanceAnalyzer>;
         brain.add_layer(Arc::new(IntelligentFullCompactor::new(
             llm.clone(),
             importance_analyzer,
@@ -235,12 +255,64 @@ impl MindPalaceMiddleware {
 
         Self::new(
             Arc::new(brain),
-            extractor,
+            session_extractor,
+            shared_extractor,
             retriever,
             bridge,
             Some(dreamer),
             session_id,
+            shared_kb_path,
         )
+    }
+
+    /// Mirrors shared knowledge into a human-readable Markdown file.
+    pub async fn mirror_shared_knowledge(&self) -> anyhow::Result<()> {
+        let kb_data = self.shared_extractor.storage.retrieve(&self.shared_knowledge_path).await?;
+        if kb_data.is_empty() { return Ok(()); }
+        
+        let kb: mem_core::KnowledgeBase = serde_json::from_slice(&kb_data).unwrap_or_default();
+        let facts = kb.graph.all_active_facts();
+        
+        let mut md = String::from("---\nname: shared_knowledge\ndescription: \"Learned patterns and tool optimizations shared across sessions.\"\n---\n\n# Shared Knowledge\n\n");
+        md.push_str("| Category | Fact | Confidence | Tags |\n|----------|------|------------|------|\n");
+        
+        for f in facts {
+            let tags = f.tags.join(", ");
+            md.push_str(&format!("| {} | {} | {:.2} | {} |\n", f.category, f.content, f.confidence, tags));
+        }
+        
+        self.shared_extractor.storage.store("shared_knowledge.md", md.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn extract_and_route(&self, context: &mem_core::Context) -> anyhow::Result<()> {
+        let facts = self.session_extractor.extract_facts(context).await?;
+        if facts.is_empty() { return Ok(()); }
+        
+        let mut session_facts = Vec::new();
+        let mut shared_facts = Vec::new();
+        
+        for f in facts {
+            match f.scope {
+                mem_core::FactScope::Private => session_facts.push(f),
+                _ => shared_facts.push(f),
+            }
+        }
+        
+        if !session_facts.is_empty() {
+            self.session_extractor.commit_knowledge(session_facts).await?;
+        }
+        
+        if !shared_facts.is_empty() {
+            self.shared_extractor.commit_knowledge(shared_facts).await?;
+            let _ = self.mirror_shared_knowledge().await;
+        }
+        
+        // Hydrate from both
+        self.retriever.hydrate_from_kb(&self.session_extractor.knowledge_path).await?;
+        self.retriever.append_from_kb(&self.shared_extractor.knowledge_path).await?;
+        
+        Ok(())
     }
 }
 
@@ -260,12 +332,9 @@ impl Middleware for MindPalaceMiddleware {
                 metadata: serde_json::json!({}),
             }],
         };
-        let user_facts = self.extractor.extract_facts(&user_context).await?;
-        if !user_facts.is_empty() {
-            self.extractor.commit_knowledge(user_facts).await?;
-            self.retriever
-                .hydrate_from_kb(&self.extractor.knowledge_path)
-                .await?;
+        let user_facts_result = self.extract_and_route(&user_context).await;
+        if let Err(e) = user_facts_result {
+            tracing::error!("Failed to route user facts: {}", e);
         }
 
         // 2. High-Precision RAG: Use recent context + prompt for query
@@ -330,14 +399,9 @@ impl Middleware for MindPalaceMiddleware {
             }],
         };
 
-        let new_facts = self.extractor.extract_facts(&ai_context).await?;
-        if !new_facts.is_empty() {
-            let fact_strings: Vec<String> = new_facts.iter().map(|f| f.content.clone()).collect();
-            tracing::info!(facts = ?fact_strings, "Extracted {} facts from AI response.", new_facts.len());
-            self.extractor.commit_knowledge(new_facts).await?;
-            self.retriever
-                .hydrate_from_kb(&self.extractor.knowledge_path)
-                .await?;
+        let ai_facts_result = self.extract_and_route(&ai_context).await;
+        if let Err(e) = ai_facts_result {
+            tracing::error!("Failed to route AI facts: {}", e);
         }
         Ok(())
     }
@@ -353,14 +417,9 @@ impl Middleware for MindPalaceMiddleware {
             }],
         };
 
-        let new_facts = self.extractor.extract_facts(&temp_context).await?;
-        if !new_facts.is_empty() {
-            let fact_strings: Vec<String> = new_facts.iter().map(|f| f.content.clone()).collect();
-            tracing::info!(facts = ?fact_strings, "Extracted {} facts from tool output.", new_facts.len());
-            self.extractor.commit_knowledge(new_facts).await?;
-            self.retriever
-                .hydrate_from_kb(&self.extractor.knowledge_path)
-                .await?;
+        let tool_facts_result = self.extract_and_route(&temp_context).await;
+        if let Err(e) = tool_facts_result {
+            tracing::error!("Failed to route tool facts: {}", e);
         }
 
         Ok(())

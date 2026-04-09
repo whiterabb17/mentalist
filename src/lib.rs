@@ -55,6 +55,12 @@ pub mod executor {
         pub registry: Arc<ToolRegistry>,
     }
 
+    impl Default for MultiExecutor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl MultiExecutor {
         pub fn new() -> Self {
             Self { registry: Arc::new(ToolRegistry::new()) }

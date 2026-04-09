@@ -11,6 +11,12 @@ pub struct LLMRouter {
     pub providers: Vec<std::sync::Arc<dyn LLMProvider>>,
 }
 
+impl Default for LLMRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LLMRouter {
     pub fn new() -> Self {
         Self { providers: Vec::new() }

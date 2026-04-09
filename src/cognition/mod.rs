@@ -178,7 +178,7 @@ mod tests {
         let feedback: Feedback = serde_json::from_str(json).unwrap();
         assert_eq!(feedback.score, 0.5);
         assert_eq!(feedback.critique, "Needs more detail");
-        assert_eq!(feedback.suggests_retry, true);
+        assert!(feedback.suggests_retry);
     }
 
     #[test]
@@ -191,6 +191,6 @@ mod tests {
         let feedback: Feedback = serde_json::from_str(json).unwrap();
         assert_eq!(feedback.score, 1.0);
         assert_eq!(feedback.critique, "Perfect");
-        assert_eq!(feedback.suggests_retry, false);
+        assert!(!feedback.suggests_retry);
     }
 }

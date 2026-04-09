@@ -301,7 +301,18 @@ impl AgentRuntime {
                 let _ = tx.send(RuntimeEvent::Status(format!("Critic: {}", feedback.critique)));
             }
             
-            // 4. STORE MEMORY
+            // 4. INTEGRATE RESULTS INTO CONTEXT
+            // We do this before Critique and Adapt to ensure the 7-layers see the latest reality
+            for res in results.values() {
+                ctx.items.push(mem_core::MemoryItem {
+                    role: mem_core::MemoryRole::Tool,
+                    content: format!("Tool result: {}", res.output),
+                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    metadata: serde_json::json!({ "task_id": res.task_id }),
+                });
+            }
+            
+            // 5. STORE MEMORY (Long-term)
             send_metrics(step, "STORE", &tx, total_input_tokens, total_output_tokens, &ctx);
             
             tracing::info!(step, "Phase: STORE MEMORY");

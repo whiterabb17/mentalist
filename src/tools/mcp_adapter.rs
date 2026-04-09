@@ -11,6 +11,8 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
+type McpStream = (tokio::process::ChildStdin, BufReader<tokio::process::ChildStdout>);
+
 pub struct McpServer {
     pub name: String,
     pub command: String,
@@ -19,7 +21,7 @@ pub struct McpServer {
     pub cwd: Option<std::path::PathBuf>,
     pub initialization_timeout: std::time::Duration,
     process: Arc<Mutex<Option<Child>>>,
-    stdio: Arc<Mutex<Option<(tokio::process::ChildStdin, BufReader<tokio::process::ChildStdout>)>>>,
+    stdio: Arc<Mutex<Option<McpStream>>>,
     id_counter: AtomicI64,
 }
 
@@ -223,8 +225,46 @@ impl Tool for McpTool {
         }
     }
 
-    async fn execute(&self, input: Value) -> Result<Value> {
-        self.server.call(&self.name, input).await
+    async fn execute(&self, mut input: Value) -> Result<Value> {
+        let mut retries = 0;
+        let max_retries = 2;
+
+        loop {
+            match self.server.call(&self.name, input.clone()).await {
+                Ok(res) => return Ok(res),
+                Err(e) if retries < max_retries && (self.name.contains("search") || self.name.contains("duckduckgo")) => {
+                    retries += 1;
+                    
+                    // Progressive backoff: 1.5s, 3s
+                    let delay = 1000 + (retries * 500); 
+                    tracing::warn!(target: "mentalist::mcp", "Tool '{}' failed ({}). Retrying in {}ms with reduced parameters...", self.name, e, delay);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+                    // Parameter reduction logic for search tools (Gap 2 resolution)
+                    if let Some(obj) = input.as_object_mut() {
+                        let params = ["max_results", "count", "limit", "max_items"];
+                        for p in params {
+                            if let Some(val) = obj.get_mut(p) {
+                                if let Some(current) = val.as_i64() {
+                                    let new_val = match current {
+                                        10.. => 5,
+                                        5..=9 => 3,
+                                        2..=4 => 1,
+                                        _ => current,
+                                    };
+                                    if new_val < current {
+                                        *val = serde_json::Value::from(new_val);
+                                        tracing::info!(target: "mentalist::mcp", "Reduced parameter '{}' from {} to {} for retry.", p, current, new_val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     fn source(&self) -> String {
@@ -236,22 +276,30 @@ pub struct BuiltinMcp;
 
 impl BuiltinMcp {
     pub fn filesystem(paths: Vec<String>, root: Option<&std::path::Path>) -> Result<McpServer> {
+        let canonical_paths: Vec<String> = paths.into_iter()
+            .map(|p| {
+                std::fs::canonicalize(&p)
+                    .map(|cp| cp.to_string_lossy().to_string())
+                    .unwrap_or(p)
+            })
+            .collect();
+
         let (cmd, args) = if let Some(r) = root {
             let bin_name = if cfg!(target_os = "windows") { "mcp-server-filesystem.cmd" } else { "mcp-server-filesystem" };
             let bin_path = r.join("filesystem").join("node_modules").join(".bin").join(bin_name);
             
             if bin_path.exists() {
-                (bin_path.to_string_lossy().to_string(), paths)
+                (bin_path.to_string_lossy().to_string(), canonical_paths)
             } else {
                 let npx = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
                 let mut npx_args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
-                npx_args.extend(paths);
+                npx_args.extend(canonical_paths);
                 (npx.to_string(), npx_args)
             }
         } else {
             let npx = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
             let mut npx_args = vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()];
-            npx_args.extend(paths);
+            npx_args.extend(canonical_paths);
             (npx.to_string(), npx_args)
         };
 
