@@ -360,8 +360,8 @@ dependencies = [
 
 [[package]]
 name = "brain"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "mem-bridge",
@@ -531,9 +531,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.59"
+version = "1.2.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7a4d3ec6524d28a329fc53654bbadc9bdd7b0431f5d65f1a56ffb28a1ee5283"
+checksum = "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2179,9 +2179,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ddbf48fd451246b1f8c2610bd3b4ac0cc6e149d89832867093ab69a17194f08"
+checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
 ]
@@ -2280,8 +2280,8 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mem-bridge"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2295,8 +2295,8 @@ dependencies = [
 
 [[package]]
 name = "mem-broker"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "fs4",
@@ -2309,8 +2309,8 @@ dependencies = [
 
 [[package]]
 name = "mem-compactor"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2325,8 +2325,8 @@ dependencies = [
 
 [[package]]
 name = "mem-core"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2355,8 +2355,8 @@ dependencies = [
 
 [[package]]
 name = "mem-dreamer"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2372,8 +2372,8 @@ dependencies = [
 
 [[package]]
 name = "mem-extractor"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2389,8 +2389,8 @@ dependencies = [
 
 [[package]]
 name = "mem-micro"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2404,8 +2404,8 @@ dependencies = [
 
 [[package]]
 name = "mem-offloader"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2419,8 +2419,8 @@ dependencies = [
 
 [[package]]
 name = "mem-personality"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2434,8 +2434,8 @@ dependencies = [
 
 [[package]]
 name = "mem-planner"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2450,8 +2450,8 @@ dependencies = [
 
 [[package]]
 name = "mem-resilience"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2467,8 +2467,8 @@ dependencies = [
 
 [[package]]
 name = "mem-retriever"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2485,8 +2485,8 @@ dependencies = [
 
 [[package]]
 name = "mem-session"
-version = "0.3.0"
-source = "git+https://github.com/whiterabb17/mindpalace.git#46b04cc981aa341ebdac85321fdcba98a2249eb6"
+version = "0.3.1"
+source = "git+https://github.com/whiterabb17/mindpalace.git#5cb40300205e67ca61e3cb3a1823c2c5005f808c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3682,7 +3682,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.10",
+ "rustls-webpki 0.103.11",
  "subtle",
  "zeroize",
 ]
@@ -3718,9 +3718,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.10"
+version = "0.103.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
+checksum = "20a6af516fea4b20eccceaf166e8aa666ac996208e8a644ce3ef5aa783bc7cd4"
 dependencies = [
  "ring",
  "rustls-pki-types",

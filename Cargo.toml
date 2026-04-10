@@ -11,20 +11,20 @@ default = []
 wasm-tools = []
 
 [dependencies]
-mem-core = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-brain = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-resilience = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-extractor = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-retriever = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-bridge = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-offloader = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-micro = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-personality = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-session = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-compactor = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-dreamer = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-broker = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
-mem-planner = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.0" }
+mem-core = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+brain = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-resilience = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-extractor = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-retriever = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-bridge = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-offloader = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-micro = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-personality = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-session = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-compactor = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-dreamer = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-broker = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
+mem-planner = { git = "https://github.com/whiterabb17/mindpalace.git", version = "0.3.1" }
 
 tokio = { version = "1.40", features = ["rt", "fs", "sync", "macros"] }
 serde = { version = "1.0.200", features = ["derive"] }
@@ -63,17 +63,17 @@ harness = false
 
 # NOTE: Enabled for local development during hardening
 #[patch."https://github.com/whiterabb17/mindpalace.git"]
-#mem-core = { path = "../mindpalace/crates/mem-core", version = "0.3.0" }
-#brain = { path = "../mindpalace/crates/brain", version = "0.3.0" }
-#mem-resilience = { path = "../mindpalace/crates/mem-resilience", version = "0.3.0" }
-#mem-extractor = { path = "../mindpalace/crates/mem-extractor", version = "0.3.0" }
-#mem-retriever = { path = "../mindpalace/crates/mem-retriever", version = "0.3.0" }
-#mem-bridge = { path = "../mindpalace/crates/mem-bridge", version = "0.3.0" }
-#mem-offloader = { path = "../mindpalace/crates/mem-offloader", version = "0.3.0" }
-#mem-micro = { path = "../mindpalace/crates/mem-micro", version = "0.3.0" }
-#mem-personality = { path = "../mindpalace/crates/mem-personality", version = "0.3.0" }
-#mem-session = { path = "../mindpalace/crates/mem-session", version = "0.3.0" }
-#mem-compactor = { path = "../mindpalace/crates/mem-compactor", version = "0.3.0" }
-#mem-dreamer = { path = "../mindpalace/crates/mem-dreamer", version = "0.3.0" }
-#mem-broker = { path = "../mindpalace/crates/mem-broker", version = "0.3.0" }
+#mem-core = { path = "../mindpalace/crates/mem-core", version = "0.3.1" }
+#brain = { path = "../mindpalace/crates/brain", version = "0.3.1" }
+#mem-resilience = { path = "../mindpalace/crates/mem-resilience", version = "0.3.1" }
+#mem-extractor = { path = "../mindpalace/crates/mem-extractor", version = "0.3.1" }
+#mem-retriever = { path = "../mindpalace/crates/mem-retriever", version = "0.3.1" }
+#mem-bridge = { path = "../mindpalace/crates/mem-bridge", version = "0.3.1" }
+#mem-offloader = { path = "../mindpalace/crates/mem-offloader", version = "0.3.1" }
+#mem-micro = { path = "../mindpalace/crates/mem-micro", version = "0.3.1" }
+#mem-personality = { path = "../mindpalace/crates/mem-personality", version = "0.3.1" }
+#mem-session = { path = "../mindpalace/crates/mem-session", version = "0.3.1" }
+#mem-compactor = { path = "../mindpalace/crates/mem-compactor", version = "0.3.1" }
+#mem-dreamer = { path = "../mindpalace/crates/mem-dreamer", version = "0.3.1" }
+#mem-broker = { path = "../mindpalace/crates/mem-broker", version = "0.3.1" }
 #mem-planner = { path = "../mindpalace/crates/mem-planner" }
