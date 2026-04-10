@@ -148,7 +148,7 @@ impl MindPalaceMiddleware {
         config_override: Option<MindPalaceConfig>,
     ) -> Self {
         let config = config_override.unwrap_or_else(|| MindPalaceConfig {
-            max_context_items: 50, // Standard threshold for deep focus
+            max_context_items: 2000, // High safety threshold to favor MindPalace memory layers over pruning
             ..Default::default()
         });
 
