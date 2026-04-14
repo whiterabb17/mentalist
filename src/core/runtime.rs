@@ -18,7 +18,7 @@ pub enum RuntimeEvent {
     Status(String),
     TextChunk(String),
     ToolStarted(String),
-    ToolFinished(String, String, bool), // name, result, success
+    ToolFinished(mem_planner::TaskId, String, String, bool), // id, name, result, success
     MetricUpdate {
         step: usize,
         phase: String,
@@ -26,6 +26,7 @@ pub enum RuntimeEvent {
         output_tokens: usize,
         context_size: usize,
     },
+    PlanStarted(mem_planner::ExecutionPlan),
     AwaitingApproval(mem_planner::ExecutionPlan),
 }
 
@@ -119,6 +120,11 @@ impl AgentRuntime {
                 total_output_tokens += usage.completion_tokens as usize;
             }
             
+            // Signal Plan Creation
+            if let Some(ref tx) = tx {
+                let _ = tx.send(RuntimeEvent::PlanStarted(plan.clone()));
+            }
+
             // 4. DEDUCTIVE FACT EXTRACTION (Middleware Hook)
             let mut res_mw = mem_core::Response {
                 content: plan.content.clone(),
@@ -276,7 +282,7 @@ impl AgentRuntime {
                         }
                         
                         if let Some(ref tx) = tx_deep {
-                            let _ = tx.send(RuntimeEvent::ToolFinished(tool_name, result_string, success));
+                            let _ = tx.send(RuntimeEvent::ToolFinished(task.id.clone(), tool_name, result_string, success));
                         }
                     }
 
