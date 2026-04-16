@@ -1,10 +1,10 @@
 use crate::tools::registry::ToolRegistry;
-pub use mem_core::{Request, Response, ToolCall, Context};
 use async_trait::async_trait;
 use brain::Brain;
 use mem_bridge::AgentBridge;
 use mem_compactor::IntelligentFullCompactor;
-use mem_core::{FileStorage, MemoryItem, MemoryRole, MindPalaceConfig, StorageBackend};
+pub use mem_core::{Context, FileStorage, MemoryItem, MemoryRole, MindPalaceConfig, Request, Response, StorageBackend, ToolCall};
+use mem_core::db::SqliteSearchEngine;
 use mem_dreamer::DreamWorker;
 use mem_extractor::{FactExtractor, ReflectionLayer};
 use mem_micro::{AdaptiveMicroCompactor, TTLDecayStrategy};
@@ -13,6 +13,7 @@ use mem_personality::PersonalityGuard;
 use mem_retriever::{MemoryRetriever, RuVectorStore};
 use mem_session::SessionSummarizer;
 use ruvector_core::types::DistanceMetric;
+use crate::tools::memory::get_memory_tools;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -109,6 +110,9 @@ pub struct MindPalaceMiddleware {
     pub session_id: String,
     pub shared_knowledge_path: String,
     pub token_budget: usize,
+    pub live_context: Arc<tokio::sync::RwLock<Context>>,
+    pub search_engine: Arc<SqliteSearchEngine>,
+    pub graph: Arc<mem_core::FactGraph>,
 }
 
 impl MindPalaceMiddleware {
@@ -122,6 +126,9 @@ impl MindPalaceMiddleware {
         dreamer: Option<Arc<DreamWorker<FileStorage>>>,
         session_id: String,
         shared_knowledge_path: String,
+        live_context: Arc<tokio::sync::RwLock<Context>>,
+        search_engine: Arc<SqliteSearchEngine>,
+        graph: Arc<mem_core::FactGraph>,
     ) -> Self {
         Self {
             brain,
@@ -133,6 +140,9 @@ impl MindPalaceMiddleware {
             session_id,
             shared_knowledge_path,
             token_budget: 4096,
+            live_context,
+            search_engine,
+            graph,
         }
     }
 
@@ -251,7 +261,22 @@ impl MindPalaceMiddleware {
             DistanceMetric::Cosine,
             graph.clone(),
         ));
-        let retriever = MemoryRetriever::new(storage, embeddings, llm.clone(), store, graph);
+        let retriever = MemoryRetriever::new(storage, embeddings, llm.clone(), store, graph.clone());
+
+        // Start Web Viewer
+        let live_context = Arc::new(tokio::sync::RwLock::new(Context::default()));
+        let viewer_state = mem_viewer::server::ViewerState {
+            context: live_context.clone(),
+            graph: graph.clone(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = mem_viewer::server::start_viewer(viewer_state, 37777).await {
+                tracing::error!("Failed to start mem-viewer Server: {:?}", e);
+            }
+        });
+
+        // Initialize Sqlite Search Engine for PD Mode
+        let search_engine = Arc::new(SqliteSearchEngine::new(Some(vault_path.join("memory.db"))).expect("Failed to init search engine"));
 
         Self::new(
             Arc::new(brain),
@@ -262,7 +287,22 @@ impl MindPalaceMiddleware {
             Some(dreamer),
             session_id,
             shared_kb_path,
+            live_context,
+            search_engine,
+            graph,
         )
+    }
+
+    /// Helper to register Progressive Disclosure tools into the agent's ToolRegistry.
+    pub async fn register_memory_tools(
+        &self,
+        registry: &crate::tools::registry::ToolRegistry,
+    ) -> anyhow::Result<()> {
+        let tools = get_memory_tools(self.search_engine.clone(), self.graph.clone());
+        for tool in tools {
+            registry.register(tool).await;
+        }
+        Ok(())
     }
 
     /// Mirrors shared knowledge into a human-readable Markdown file.
@@ -367,7 +407,13 @@ impl Middleware for MindPalaceMiddleware {
         self.brain.optimize(&mut current_context).await?;
 
         // Replace with optimized Arc
-        req.context = Arc::new(current_context);
+        req.context = Arc::new(current_context.clone());
+
+        // Update live context for web viewer
+        {
+            let mut lc = self.live_context.write().await;
+            lc.items = current_context.items.clone();
+        }
 
         // 4. Proactive token budget compaction check
         if let Some(counter) = &self.brain.token_counter {
@@ -403,6 +449,13 @@ impl Middleware for MindPalaceMiddleware {
         if let Err(e) = ai_facts_result {
             tracing::error!("Failed to route AI facts: {}", e);
         }
+
+        // Live Context Tracking
+        {
+            let mut lc = self.live_context.write().await;
+            lc.items.push(ai_context.items[0].clone());
+        }
+
         Ok(())
     }
 
@@ -420,6 +473,12 @@ impl Middleware for MindPalaceMiddleware {
         let tool_facts_result = self.extract_and_route(&temp_context).await;
         if let Err(e) = tool_facts_result {
             tracing::error!("Failed to route tool facts: {}", e);
+        }
+
+        // Live Context Tracking
+        {
+            let mut lc = self.live_context.write().await;
+            lc.items.push(temp_context.items[0].clone());
         }
 
         Ok(())

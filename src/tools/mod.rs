@@ -4,6 +4,7 @@ use serde_json::Value;
 pub mod registry;
 pub mod mcp_adapter;
 pub mod skills;
+pub mod memory;
 
 pub use registry::ToolRegistry;
 
