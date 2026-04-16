@@ -1,4 +1,4 @@
-# Mentalist (v0.3.8): Cognitive AI Agent Runtime
+# Mentalist (v0.4.0): Cognitive AI Agent Runtime
 
 ![Rust](https://img.shields.io/badge/language-Rust-orange.svg) ![Status: Production-Ready](https://img.shields.io/badge/Status-Production--Ready-brightgreen.svg) ![Ecosystem: MindPalace](https://img.shields.io/badge/Ecosystem-MindPalace-magenta.svg)
 
@@ -19,8 +19,8 @@ Mentalist orchestrates agent behavior through a continuous state machine, ensuri
 ---
 
 ## 🏰 Deep MindPalace Integration
-
-Mentalist v0.3.8 is built on a "Defense-in-Depth" memory strategy. It handles the complexity of the MindPalace 7-layer pipeline through its **Middleware System**:
++
++Mentalist v0.4.0 is built on a "Defense-in-Depth" memory strategy. It handles the complexity of the MindPalace 8-layer pipeline through its **Middleware System**:
 
 -   **Hardened Middleware**: The `MindPalaceMiddleware::hardened` constructor automatically initializes a `Brain` with all 7 layers (Identity, Offloading, Compaction, Extraction, etc.).
 -   **Proactive Knowledge Injection**: During the `before_ai_call` hook, Mentalist queries the `MemoryRetriever` and injects high-precision RAG facts directly into the system context.
@@ -29,7 +29,7 @@ Mentalist v0.3.8 is built on a "Defense-in-Depth" memory strategy. It handles th
 
 ---
 
-## 🔮 Aggregator API (v0.3.8)
+## 🔮 Aggregator API (v0.4.0)
 
 Mentalist serves as the primary entry point for the entire ecosystem, re-exporting core types to simplify agent development:
 
